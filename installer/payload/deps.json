@@ -1,0 +1,9 @@
+{
+  "webview2": {
+    "name": "WebView2 Runtime",
+    "version": "155.0.4283.45",
+    "file": "MicrosoftEdgeWebView2RuntimeInstallerX64.exe",
+    "sha256": "2a6add76c37bfa872eb8c2b22d45b3216b8e2a1f193e0774006340ff62ac5fa0",
+    "source": "https://go.microsoft.com/fwlink/?linkid=2124701"
+  }
+}

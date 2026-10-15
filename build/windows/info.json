@@ -1,0 +1,15 @@
+{
+	"fixed": {
+		"file_version": "0.1.0.0"
+	},
+	"info": {
+		"0000": {
+			"ProductVersion": "0.1.0",
+			"CompanyName": "MeiliPilot",
+			"FileDescription": "MeiliPilot",
+			"LegalCopyright": "Copyright © 2026 sangnx6297@gmail.com",
+			"ProductName": "MeiliPilot",
+			"Comments": "Desktop client for Meilisearch"
+		}
+	}
+}
