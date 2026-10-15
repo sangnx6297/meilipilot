@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Simple MSI for MeiliPilot — cùng kết quả tutorial Advanced Installer:
+  Program Files, Product Details, Start Menu + Desktop, Add/Remove Programs, Major Upgrade.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package
+    Name="MeiliPilot"
+    Manufacturer="MeiliPilot"
+    Version="0.1.0"
+    UpgradeCode="A7C3E91B-4D2F-4A6E-9C18-B5E04F7A2D11"
+    Language="1033"
+    Scope="perMachine"
+    InstallerVersion="500">
+    <SummaryInformation Description="MeiliPilot - desktop client for Meilisearch" Manufacturer="MeiliPilot" />
+
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of MeiliPilot is already installed."
+      AllowSameVersionUpgrades="yes" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="AppIcon.ico" SourceFile="!(bindpath.Res)\icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon.ico" />
+    <Property Id="ARPHELPLINK" Value="mailto:sangnx6297@gmail.com" />
+    <Property Id="ARPURLINFOABOUT" Value="mailto:sangnx6297@gmail.com" />
+    <Property Id="ARPCOMMENTS" Value="Desktop client for Meilisearch" />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+
+    <ui:WixUI Id="WixUI_InstallDir" />
+    <WixVariable Id="WixUILicenseRtf" Value="license.rtf" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="MeiliPilot" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="AppStartMenuFolder" Name="MeiliPilot" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="DesktopFolder" />
+
+    <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+      <Component Id="AppExe" Guid="B8D1F02C-6E47-4B19-A3C5-91F8D2E4A077">
+        <File Id="MeiliPilotExe" Source="!(bindpath.Bin)\MeiliPilot.exe" KeyPath="yes">
+          <Shortcut
+            Id="StartMenuShortcut"
+            Directory="AppStartMenuFolder"
+            Name="MeiliPilot"
+            WorkingDirectory="INSTALLFOLDER"
+            Icon="AppIcon.ico"
+            Advertise="no" />
+          <Shortcut
+            Id="DesktopShortcut"
+            Directory="DesktopFolder"
+            Name="MeiliPilot"
+            WorkingDirectory="INSTALLFOLDER"
+            Icon="AppIcon.ico"
+            Advertise="no" />
+        </File>
+        <RemoveFolder Id="RemoveStartMenu" Directory="AppStartMenuFolder" On="uninstall" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="Main" Title="MeiliPilot" Description="Desktop client for Meilisearch" Level="1" AllowAbsent="no">
+      <ComponentGroupRef Id="AppFiles" />
+    </Feature>
+  </Package>
+</Wix>

@@ -1,0 +1,10 @@
+frontend/node_modules
+frontend/dist
+build/bin
+*.exe
+*.wixpdb
+installer/payload/*.exe
+.DS_Store
+.superpowers/
+!build/windows/rcedit-x64.exe
+
