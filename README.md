@@ -1,0 +1,2 @@
+# meilipilot
+Meilisearch Client
