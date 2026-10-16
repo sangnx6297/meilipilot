@@ -4,6 +4,8 @@ import {
   SEARCH_QUERY_FIELDS,
   csvList,
   formToSearchQuery,
+  parseSearchBody,
+  queryToForm,
   type SearchFormState
 } from './search-form';
 
@@ -130,5 +132,25 @@ describe('formToSearchQuery', () => {
 
   it('sends useNetwork false explicitly', () => {
     expect(formToSearchQuery({ ...EMPTY_SEARCH_FORM, useNetwork: 'false' }).useNetwork).toBe(false);
+  });
+
+  it('keeps an array filter when the field is a JSON array', () => {
+    expect(formToSearchQuery({ ...EMPTY_SEARCH_FORM, filter: '[["genres = horror","genres = mystery"]]' }).filter).toEqual([
+      ['genres = horror', 'genres = mystery']
+    ]);
+  });
+});
+
+describe('queryToForm', () => {
+  it('round-trips a filled form through the search body', () => {
+    const query = formToSearchQuery(filled());
+    expect(formToSearchQuery(queryToForm(query))).toEqual(query);
+  });
+
+  it('reads a raw JSON body and drops unknown keys', () => {
+    const query = parseSearchBody('{"q":"ao","limit":3,"extra":true}');
+    expect(query).toEqual({ q: 'ao', limit: 3 });
+    expect(queryToForm(query).q).toBe('ao');
+    expect(queryToForm(query).limit).toBe('3');
   });
 });

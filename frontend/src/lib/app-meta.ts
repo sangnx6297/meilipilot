@@ -1,5 +1,5 @@
 export const APP_NAME = 'MeiliPilot';
-export const APP_VERSION = '0.1.0';
+export const APP_VERSION = '0.2.0';
 export const APP_AUTHOR_EMAIL = 'sangnx6297@gmail.com';
 export const APP_COPYRIGHT = `© 2026 ${APP_AUTHOR_EMAIL}`;
 export const APP_TAGLINE = 'Desktop client cho Meilisearch';

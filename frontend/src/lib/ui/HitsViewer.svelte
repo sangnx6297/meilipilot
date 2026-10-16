@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { Snippet } from 'svelte';
   import CodeBlock from './CodeBlock.svelte';
   import {
     type HitsViewMode,
@@ -27,7 +28,9 @@
     selectedIds = [],
     onToggleSelect,
     onDelete,
-    onSimilar
+    onSimilar,
+    split = false,
+    leading
   }: {
     rows?: Record<string, unknown>[];
     indexUid?: string;
@@ -36,6 +39,8 @@
     onToggleSelect?: (id: string, checked: boolean) => void;
     onDelete?: (id: string) => void;
     onSimilar?: (id: string) => void;
+    split?: boolean;
+    leading?: Snippet;
   } = $props();
 
   let mode = $state<HitsViewMode>(loadHitsViewMode());
@@ -173,7 +178,11 @@
   </div>
 {/snippet}
 
-<div class="flex flex-wrap items-center gap-2 mb-3">
+<div class={split ? 'hits-pane' : 'min-w-0'}>
+<div class="hits-toolbar flex flex-wrap items-center gap-2" class:mb-3={!split}>
+  {#if leading}
+    <div class="mr-auto flex min-w-0 flex-wrap items-center gap-2">{@render leading()}</div>
+  {/if}
   <div class="join">
     <button type="button" class="btn btn-sm join-item" class:btn-active={mode === 'table'} onclick={() => setMode('table')}>Table</button>
     <button type="button" class="btn btn-sm join-item" class:btn-active={mode === 'detail'} onclick={() => setMode('detail')}>Detail</button>
@@ -204,9 +213,9 @@
 </div>
 
 {#if rows.length === 0}
-  <p class="text-sm text-base-content/60">Không có kết quả</p>
+  <p class="hits-body text-sm text-base-content/60">Không có kết quả</p>
 {:else if mode === 'table'}
-  <div class="hits-grid-wrap">
+  <div class="hits-grid-wrap hits-body">
     <table class="hits-grid" class:has-check={showSelect}>
       <thead>
         <tr>
@@ -285,7 +294,7 @@
     </table>
   </div>
 {:else if mode === 'detail'}
-  <div class="flex min-h-72 overflow-hidden rounded-box border border-base-300 bg-base-100">
+  <div class="hits-body flex min-h-72 overflow-hidden rounded-box border border-base-300 bg-base-100">
     <ul class="w-[38%] shrink-0 border-r border-base-200 overflow-auto max-h-[32rem]">
       {#each rows as row, i}
         {@const id = rowId(row)}
@@ -321,7 +330,7 @@
     </div>
   </div>
 {:else}
-  <div class="space-y-3">
+  <div class="hits-body space-y-3">
     {#each rows as row}
       {@const parts = splitDocMeta(row)}
       {@const id = rowId(row)}
@@ -349,3 +358,4 @@
     {/each}
   </div>
 {/if}
+</div>

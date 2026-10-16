@@ -7,6 +7,7 @@ const KEY = 'meili-shell';
 export type ShellCtx = {
   session: Session | null;
   caps: EngineCapability;
+  refreshCaps: () => Promise<void>;
 };
 
 export function setShell(getter: () => ShellCtx): void {
@@ -15,5 +16,5 @@ export function setShell(getter: () => ShellCtx): void {
 
 export function shellReader(): () => ShellCtx {
   const getter = getContext<() => ShellCtx>(KEY);
-  return () => (getter ? getter() : { session: null, caps: DEFAULT_CAPS });
+  return () => (getter ? getter() : { session: null, caps: DEFAULT_CAPS, refreshCaps: async () => {} });
 }

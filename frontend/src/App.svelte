@@ -13,8 +13,10 @@
   import TaskDetail from './pages/TaskDetail.svelte';
   import Keys from './pages/Keys.svelte';
   import Instance from './pages/Instance.svelte';
+  import Logs from './pages/Logs.svelte';
   import Chat from './pages/Chat.svelte';
   import Rules from './pages/Rules.svelte';
+  import Mcp from './pages/Mcp.svelte';
   import SettingsDiff from './pages/SettingsDiff.svelte';
   import { meili } from './lib/api/client';
   import { capabilitiesFrom, DEFAULT_CAPS } from './lib/api/capability';
@@ -23,6 +25,7 @@
   import { titleFromHash } from './lib/document-title';
   import { currentSession, disconnect, listProfiles, useProfile, type Profile, type Session } from './lib/store/connection';
   import { loadLastHash, saveLastHash } from './lib/workspace-prefs';
+  import { logSession } from './lib/log-session.svelte';
 
   let session = $state<Session | null>(null);
   let profiles = $state<Profile[]>([]);
@@ -107,6 +110,7 @@
   }
 
   async function logout() {
+    logSession.stop();
     await disconnect();
     session = null;
     profiles = await listProfiles();
@@ -115,6 +119,7 @@
 
   async function switchProfile(id: string) {
     if (!id || id === session?.id) return;
+    logSession.stop();
     await useProfile(id);
     await refreshAuth();
     location.hash = '#/dashboard';
@@ -122,6 +127,7 @@
   }
 
   async function manage() {
+    logSession.stop();
     session = null;
     location.hash = '#/connect';
   }
@@ -132,7 +138,7 @@
 {#if !session}
   <Connect onconnected={async () => { await refreshAuth(); location.hash = '#/dashboard'; }} />
 {:else}
-  <Layout {session} {profiles} {caps} path={hash} onlogout={logout} onswitch={switchProfile} onmanage={manage}>
+  <Layout {session} {profiles} {caps} path={hash} onlogout={logout} onswitch={switchProfile} onmanage={manage} onrefreshcaps={probeCaps}>
     {#if parts[0] === 'indexes' && parts[1] && parts[2] === 'documents'}
       <Documents uid={parts[1]} />
     {:else if parts[0] === 'indexes' && parts[1] && parts[2] === 'search'}
@@ -157,10 +163,14 @@
       <Keys />
     {:else if parts[0] === 'instance'}
       <Instance />
+    {:else if parts[0] === 'logs'}
+      <Logs />
     {:else if parts[0] === 'chat'}
       <Chat />
     {:else if parts[0] === 'rules'}
       <Rules />
+    {:else if parts[0] === 'mcp'}
+      <Mcp />
     {:else}
       <Dashboard />
     {/if}

@@ -1,7 +1,25 @@
 import { describe, it, expect } from 'vitest';
 import type { Settings } from './types';
 import { SETTING_SLUGS } from './settings';
-import { SETTING_GROUPS, diffSettings, linesToList, listToLines } from './settings-form';
+import {
+  SETTING_CATEGORIES,
+  SETTING_GROUPS,
+  applyChatSearchFields,
+  chatSearchFields,
+  compactStringList,
+  diffSettings,
+  embeddersToRows,
+  filterableToRows,
+  linesToList,
+  listToLines,
+  localizedToRows,
+  rowsToEmbedders,
+  rowsToFacetSort,
+  rowsToFilterable,
+  rowsToLocalized,
+  rowsToSynonyms,
+  synonymsToRows
+} from './settings-form';
 
 const base = (): Settings => ({
   displayedAttributes: ['*'],
@@ -35,6 +53,14 @@ describe('SETTING_GROUPS', () => {
   });
 });
 
+describe('SETTING_CATEGORIES', () => {
+  it('covers every settings slug once', () => {
+    const slugs = SETTING_CATEGORIES.flatMap((category) => category.slugs);
+    expect([...slugs].sort()).toEqual([...SETTING_SLUGS].sort());
+    expect(new Set(slugs).size).toBe(slugs.length);
+  });
+});
+
 describe('diffSettings', () => {
   it('returns empty patch when nothing changed', () => {
     const a = base();
@@ -59,6 +85,46 @@ describe('diffSettings', () => {
     expect(diffSettings(original, current)).toEqual({
       typoTolerance: { enabled: false, minWordSizeForTypos: { oneTypo: 5, twoTypos: 9 } }
     });
+  });
+});
+
+describe('form rows', () => {
+  it('round-trips synonyms, filterable attributes, and locales', () => {
+    expect(rowsToSynonyms(synonymsToRows({ car: ['auto', 'vehicle'] }))).toEqual({ car: ['auto', 'vehicle'] });
+    expect(
+      rowsToFilterable(
+        filterableToRows(['genre', { attributePatterns: ['price_*'], features: { facetSearch: true } }])
+      )
+    ).toEqual(['genre', { attributePatterns: ['price_*'], features: { facetSearch: true } }]);
+    expect(rowsToLocalized(localizedToRows([{ locales: ['jpn'], attributePatterns: ['*_ja'] }]))).toEqual([
+      { locales: ['jpn'], attributePatterns: ['*_ja'] }
+    ]);
+  });
+
+  it('builds facet sort and chat search fields without dropping other search keys', () => {
+    expect(rowsToFacetSort([{ attribute: '*', order: 'alpha' }, { attribute: 'genre', order: 'count' }])).toEqual({
+      '*': 'alpha',
+      genre: 'count'
+    });
+    expect(applyChatSearchFields({ q: 'kept', limit: 5 }, chatSearchFields({ q: 'kept', limit: 20 }))).toEqual({
+      q: 'kept',
+      limit: 20
+    });
+  });
+
+  it('keeps an existing embedder apiKey out of the form until a new key is typed', () => {
+    const rows = embeddersToRows({ main: { source: 'openAi', model: 'small', apiKey: 'secret' } });
+    expect(rows[0].apiKey).toBe('');
+    expect(rowsToEmbedders(rows, { main: { source: 'openAi', model: 'small', apiKey: 'secret' } }).main).toEqual({
+      source: 'openAi',
+      model: 'small'
+    });
+    rows[0].apiKey = 'new-key';
+    expect((rowsToEmbedders(rows, { main: { apiKey: 'secret' } }).main as { apiKey: string }).apiKey).toBe('new-key');
+  });
+
+  it('drops blank list entries', () => {
+    expect(compactStringList([' title ', '', 'year'])).toEqual(['title', 'year']);
   });
 });
 

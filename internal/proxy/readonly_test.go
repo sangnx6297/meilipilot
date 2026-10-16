@@ -12,6 +12,8 @@ func TestIsReadRequest(t *testing.T) {
 		{"POST", "/indexes/movies/similar"},
 		{"POST", "/indexes/movies/documents/fetch"},
 		{"POST", "/multi-search"},
+		{"POST", "/logs/stream"},
+		{"POST", "/render-template"},
 	}
 	for _, c := range reads {
 		if !IsReadRequest(c[0], c[1]) {

@@ -23,6 +23,7 @@
   import HitsViewer from '../lib/ui/HitsViewer.svelte';
   import Skeleton from '../lib/ui/Skeleton.svelte';
   import { shellReader } from '../lib/ui/shell-context';
+  import { flagOn } from '../lib/api/capability';
   import type { SummarizedTaskView } from '../lib/api/types';
   let { uid }: { uid: string } = $props();
   let results = $state<Record<string, unknown>[]>([]);
@@ -134,10 +135,16 @@
     </div>
   </div>
 </div>
+{#if flagOn(shell.caps, 'editDocumentsByFunction')}
 <div class="card bg-base-100 shadow-sm mt-4">
   <div class="card-body p-4">
     <h2 class="font-medium">Edit by function (RHAI)</h2>
+    <p class="text-xs text-base-content/50">Hàm nhận biến <span class="font-mono">doc</span>. Trả về <span class="font-mono">null</span> để xóa document. Filter phía trên giới hạn document được sửa.</p>
     <textarea class="textarea textarea-bordered w-full font-mono text-sm" rows="4" bind:value={rhai}></textarea>
-    <button class="btn btn-outline btn-sm mt-2 w-fit" onclick={() => run(() => editByFunction(uid, { function: rhai, filter: filter || undefined }))}>Chạy</button>
+    <button class="btn btn-outline btn-sm mt-2 w-fit" disabled={!rhai.trim()} onclick={() => {
+      if (!rhai.trim()) return;
+      run(() => editByFunction(uid, { function: rhai, filter: filter || undefined }));
+    }}>Chạy</button>
   </div>
 </div>
+{/if}

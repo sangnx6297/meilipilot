@@ -22,6 +22,7 @@ export function UseProfile(
 export function DeleteProfile(id: string): Promise<void>;
 export function CopyText(text: string): Promise<void>;
 export function SaveTextFile(defaultName: string, content: string): Promise<string>;
+export function OpenTextFile(): Promise<string>;
 export function Forward(
   method: string,
   path: string,

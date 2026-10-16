@@ -12,8 +12,10 @@ const TITLES: Record<string, string> = {
   tasks: 'Tasks',
   keys: 'Keys',
   instance: 'Instance',
+  logs: 'Logs',
   chat: 'Chat',
   rules: 'Rules',
+  mcp: 'MCP',
   connect: 'Connect'
 };
 

@@ -41,6 +41,7 @@ describe('rowId', () => {
     expect(rowId({ id: 12, uid: 'x' })).toBe('12');
     expect(rowId({ uid: 'abc' })).toBe('abc');
     expect(rowId({ title: 'no' })).toBe('');
+    expect(rowId({ sku: 'A-1', id: 4 }, 'sku')).toBe('A-1');
   });
 });
 

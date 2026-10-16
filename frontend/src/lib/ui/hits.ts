@@ -17,10 +17,30 @@ export function splitDocMeta(row: Record<string, unknown>): {
   return { doc, meta };
 }
 
-export function rowId(row: Record<string, unknown>): string {
-  if (row.id !== undefined && row.id !== null) return String(row.id);
-  if (row.uid !== undefined && row.uid !== null) return String(row.uid);
+function scalarId(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
   return '';
+}
+
+export function rowId(row: Record<string, unknown>, primaryKey?: string | null): string {
+  for (const key of [primaryKey, 'id', 'uid']) {
+    if (!key) continue;
+    const id = scalarId(row[key]);
+    if (id) return id;
+  }
+  return '';
+}
+
+export function documentKey(row: Record<string, unknown>, primaryKey?: string | null): string {
+  const id = rowId(row, primaryKey);
+  if (id) return id;
+  const bits = Object.entries(splitDocMeta(row).doc)
+    .filter(([, value]) => typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean')
+    .map(([key, value]) => `${key}=${String(value)}`);
+  if (bits.length) return bits.join('\u001f');
+  const label = rowLabel(row);
+  return label === '(untitled)' ? '' : label;
 }
 
 function scalarLabel(v: unknown): string | null {

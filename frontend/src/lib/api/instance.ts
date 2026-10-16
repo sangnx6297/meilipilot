@@ -31,4 +31,5 @@ export const setLogStderr = (target: string) => meili<unknown>('POST', '/logs/st
 export const stopLogStream = () => meili<unknown>('DELETE', '/logs/stream');
 
 export const renderTemplate = (body: unknown) => meili<unknown>('POST', '/render-template', body);
+export const postMcp = (body: unknown) => meili<unknown>('POST', '/mcp', body);
 export const getMetrics = () => meiliText('GET', '/metrics');

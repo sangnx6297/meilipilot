@@ -15,8 +15,10 @@ export const COMMANDS: Command[] = [
   { id: 'tasks', label: 'Tasks', href: '#/tasks', keywords: ['queue', 'job'], group: 'Workspace' },
   { id: 'keys', label: 'Keys', href: '#/keys', keywords: ['key', 'api', 'token'], group: 'Admin' },
   { id: 'instance', label: 'Instance', href: '#/instance', keywords: ['dump', 'experimental'], group: 'Admin' },
+  { id: 'logs', label: 'Logs', href: '#/logs', keywords: ['stream', 'stderr', 'log'], group: 'Admin' },
   { id: 'chat', label: 'Chat', href: '#/chat', keywords: ['llm', 'workspace'], group: 'Admin' },
-  { id: 'rules', label: 'Rules', href: '#/rules', keywords: ['pin', 'promote'], group: 'Admin' }
+  { id: 'rules', label: 'Rules', href: '#/rules', keywords: ['pin', 'promote'], group: 'Admin' },
+  { id: 'mcp', label: 'MCP', href: '#/mcp', keywords: ['agent', 'llm'], group: 'Admin' }
 ];
 
 export function filterCommands(q: string, commands = COMMANDS): Command[] {

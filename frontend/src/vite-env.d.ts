@@ -29,6 +29,7 @@ interface Window {
         DeleteProfile: (id: string) => Promise<void>;
         CopyText: (text: string) => Promise<void>;
         SaveTextFile: (defaultName: string, content: string) => Promise<string>;
+        OpenTextFile: () => Promise<string>;
         Forward: (
           method: string,
           path: string,

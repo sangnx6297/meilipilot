@@ -13,6 +13,8 @@
   import ArrowLeft from '@lucide/svelte/icons/arrow-left';
   import GitCompare from '@lucide/svelte/icons/git-compare';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
+  import Bot from '@lucide/svelte/icons/bot';
+  import ScrollText from '@lucide/svelte/icons/scroll-text';
   import { onMount } from 'svelte';
   import { DEFAULT_CAPS, navAllowed, type EngineCapability } from '../api/capability';
   import { type Profile, type Session } from '../store/connection';
@@ -22,6 +24,9 @@
   import EnvChips from './EnvChips.svelte';
   import { setShell } from './shell-context';
   import { APP_COPYRIGHT, APP_NAME, APP_VERSION } from '../app-meta';
+  import { onLogsPage } from '../log-session';
+  import { logSession } from '../log-session.svelte';
+  import LogDock from './LogDock.svelte';
 
   let {
     session,
@@ -31,6 +36,7 @@
     onlogout,
     onswitch,
     onmanage,
+    onrefreshcaps,
     children
   }: {
     session: Session | null;
@@ -40,10 +46,15 @@
     onlogout: () => void;
     onswitch: (id: string) => void;
     onmanage: () => void;
+    onrefreshcaps?: () => Promise<void>;
     children: import('svelte').Snippet;
   } = $props();
 
-  setShell(() => ({ session, caps }));
+  setShell(() => ({ session, caps, refreshCaps: onrefreshcaps ?? (async () => {}) }));
+
+  $effect(() => {
+    logSession.follow(path, onLogsPage(path));
+  });
   let palette = $state(false);
   const adminItems = $derived(admin.filter((item) => navAllowed(item.href, caps)));
 
@@ -73,8 +84,10 @@
   const admin = [
     { href: '#/keys', label: 'Keys', icon: KeyRound, match: '/keys' },
     { href: '#/instance', label: 'Instance', icon: Server, match: '/instance' },
+    { href: '#/logs', label: 'Logs', icon: ScrollText, match: '/logs' },
     { href: '#/chat', label: 'Chat', icon: MessageSquare, match: '/chat' },
-    { href: '#/rules', label: 'Rules', icon: Scale, match: '/rules' }
+    { href: '#/rules', label: 'Rules', icon: Scale, match: '/rules' },
+    { href: '#/mcp', label: 'MCP', icon: Bot, match: '/mcp' }
   ];
 
   function active(match: string) {
@@ -167,7 +180,7 @@
         </button>
       </div>
     </aside>
-    <div class="flex min-w-0 flex-1 flex-col">
+    <div class="flex min-w-0 flex-1 flex-col" class:with-log-dock={logSession.detached}>
       <section class="min-h-0 min-w-0 flex-1 overflow-auto px-7 py-5">
         {#if session?.environment === 'production' && !session.readOnly}
           <div class="mb-3 rounded-md border border-error/35 bg-error/10 px-3 py-1.5 text-xs text-error">
@@ -193,4 +206,7 @@
     </div>
   </div>
 </div>
+{#if logSession.detached}
+  <LogDock />
+{/if}
 <CommandPalette open={palette} {caps} onclose={() => (palette = false)} />

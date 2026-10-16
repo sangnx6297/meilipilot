@@ -157,6 +157,26 @@ func (a *App) SaveTextFile(defaultName, content string) (string, error) {
 	return path, os.WriteFile(path, []byte(content), 0o644)
 }
 
+func (a *App) OpenTextFile() (string, error) {
+	if a.ctx == nil {
+		return "", nil
+	}
+	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Chọn file dump",
+		Filters: []runtime.FileFilter{
+			{DisplayName: "Dump JSON (*.json)", Pattern: "*.json"},
+		},
+	})
+	if err != nil || path == "" {
+		return "", err
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
 func (a *App) Forward(method, path string, query map[string]string, body string) (ForwardResult, error) {
 	var b []byte
 	if body != "" {

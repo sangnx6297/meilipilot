@@ -4,9 +4,12 @@
   import { getMetrics } from '../lib/api/instance';
   import type { InstanceStats, VersionResponse } from '../lib/api/types';
   import EmptyState from '../lib/ui/EmptyState.svelte';
+  import FlagSwitch from '../lib/ui/FlagSwitch.svelte';
   import ErrorBanner from '../lib/ui/ErrorBanner.svelte';
   import PageHeader from '../lib/ui/PageHeader.svelte';
+  import { flagOn } from '../lib/api/capability';
   import { createPoll } from '../lib/ui/poll';
+  import { shellReader } from '../lib/ui/shell-context';
   import {
     formatBytes,
     formatByteLabel,
@@ -28,6 +31,7 @@
   let metricsOff = $state(false);
   let metricsDisabled = $state(false);
   let error = $state<unknown>(null);
+  const readShell = shellReader();
 
   const summary = $derived(stats ? summarizeStats(stats) : null);
   const rows = $derived(stats ? indexStorageRows(stats) : []);
@@ -35,6 +39,11 @@
   const sizeBars = $derived(indexChartBars(rows, 'size'));
 
   async function loadMetrics() {
+    if (!flagOn(readShell().caps, 'metrics')) {
+      metrics = null;
+      metricsOff = true;
+      return;
+    }
     if (metricsDisabled) return;
     try {
       metrics = summarizeMetrics(parsePrometheus(await getMetrics()));
@@ -192,9 +201,9 @@
     </div>
   </section>
 {:else if metricsOff}
-  <p class="mb-5 text-xs text-base-content/45">
-    Runtime metrics tắt. Bật experimental <span class="font-mono">metrics</span> trên trang Instance nếu cần search queue / HTTP.
-  </p>
+  <div class="mb-5">
+    <FlagSwitch name="metrics" label="metrics" />
+  </div>
 {/if}
 
 {#if stats && !rows.length}

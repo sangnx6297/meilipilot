@@ -2,6 +2,7 @@ export type PkgVersion = { major: number; minor: number; patch: number };
 
 export type EngineCapability = {
   version: string;
+  flags: Record<string, boolean>;
   chat: boolean;
   rules: boolean;
   network: boolean;
@@ -14,29 +15,31 @@ export function parsePkgVersion(pkg: string): PkgVersion {
   return { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3] ?? 0) };
 }
 
-function atLeast(v: PkgVersion, major: number, minor: number): boolean {
-  return v.major > major || (v.major === major && v.minor >= minor);
-}
-
 export function capabilitiesFrom(
   pkgVersion: string,
   experimental?: Record<string, boolean> | null
 ): EngineCapability {
-  const v = parsePkgVersion(pkgVersion);
-  const exp = experimental ?? {};
+  const flags: Record<string, boolean> = {};
+  for (const [key, value] of Object.entries(experimental ?? {})) {
+    flags[key] = value === true;
+  }
   return {
     version: pkgVersion,
-    chat: exp.chatCompletions === true,
-    rules: atLeast(v, 1, 53),
-    network: exp.network === true,
-    metrics: exp.metrics === true
+    flags,
+    chat: flags.chatCompletions === true,
+    rules: flags.dynamicSearchRules === true,
+    network: flags.network === true,
+    metrics: flags.metrics === true
   };
+}
+
+export function flagOn(caps: EngineCapability, name: string): boolean {
+  return caps.flags[name] === true;
 }
 
 export const DEFAULT_CAPS: EngineCapability = capabilitiesFrom('0.0.0', {});
 
-export function navAllowed(href: string, caps: EngineCapability): boolean {
-  if (href.includes('/chat')) return caps.chat;
-  if (href.includes('/rules')) return caps.rules;
+export function navAllowed(href: string, _caps: EngineCapability): boolean {
+  void href;
   return true;
 }

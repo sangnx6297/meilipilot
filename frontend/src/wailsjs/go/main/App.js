@@ -30,6 +30,10 @@ export function SaveTextFile(defaultName, content) {
   return window.go.main.App.SaveTextFile(defaultName, content);
 }
 
+export function OpenTextFile() {
+  return window.go.main.App.OpenTextFile();
+}
+
 export function Forward(method, path, query, body) {
   return window.go.main.App.Forward(method, path, query, body);
 }

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+  import { listAllIndexUids } from '../lib/api/dump';
   import { multiSearch, type MultiQuery } from '../lib/api/search';
   import ErrorBanner from '../lib/ui/ErrorBanner.svelte';
   import PageHeader from '../lib/ui/PageHeader.svelte';
@@ -7,9 +9,22 @@
     { indexUid: '', q: '', limit: 5 },
     { indexUid: '', q: '', limit: 5 }
   ]);
+  let indexes = $state<string[]>([]);
   let federate = $state(false);
   let result = $state<unknown>(null);
   let error = $state<unknown>(null);
+
+  onMount(() => {
+    listAllIndexUids().then((uids) => {
+      indexes = uids;
+    }).catch((e) => {
+      error = e;
+    });
+  });
+
+  function setIndex(i: number, value: string) {
+    queries = queries.map((row, index) => (index === i ? { ...row, indexUid: value } : row));
+  }
   async function run() {
     error = null;
     try {
@@ -26,9 +41,14 @@
 <ErrorBanner {error} />
 <div class="card bg-base-100 shadow-sm">
   <div class="card-body p-4">
-    {#each queries as q}
+    {#each queries as q, i}
       <div class="flex flex-wrap gap-2 mb-2">
-        <input class="input input-bordered input-sm w-40" placeholder="indexUid" bind:value={q.indexUid} />
+        <select class="select select-bordered select-sm w-44 shrink-0" value={q.indexUid} onchange={(e) => setIndex(i, e.currentTarget.value)}>
+          <option value="">Chọn index</option>
+          {#each indexes as uid}
+            <option value={uid}>{uid}</option>
+          {/each}
+        </select>
         <input class="input input-bordered input-sm flex-1 min-w-48" placeholder="q" bind:value={q.q} />
       </div>
     {/each}

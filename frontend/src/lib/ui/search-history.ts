@@ -1,6 +1,8 @@
 import type { SearchQuery } from '../api/types';
-import type { SearchFormState } from '../api/search-form';
-import { rowId } from './hits';
+import { EMPTY_SEARCH_FORM, type SearchFormState } from '../api/search-form';
+import { FILTER_OPS, type FilterOp } from '../api/search-fields';
+import type { SearchTab } from '../api/search-layout';
+import { documentKey, rowLabel } from './hits';
 
 export type SearchHistoryItem = {
   at: number;
@@ -10,11 +12,157 @@ export type SearchHistoryItem = {
   processingTimeMs?: number;
   hitCount?: number;
   hitIds?: string[];
+  hitLabels?: Record<string, string>;
   hitScores?: Record<string, number | null>;
 };
 
+export function snapshotKey(item: SearchHistoryItem, index: number): string {
+  return `${item.at}:${index}`;
+}
+
+export function findSnapshot(items: SearchHistoryItem[], key: string): SearchHistoryItem | undefined {
+  const match = /^(\d+):(\d+)$/.exec(key);
+  if (!match) return undefined;
+  const index = Number(match[2]);
+  const item = items[index];
+  if (!item || String(item.at) !== match[1]) return undefined;
+  return item;
+}
+
 const PREFIX = 'meili.searchHistory:';
+const LAST_INDEX_PREFIX = 'meili.searchIndex:';
+const DRAFT_PREFIX = 'meili.searchDraft:';
 const MAX = 30;
+
+const SEARCH_TABS = new Set<SearchTab>(['filter', 'facet', 'display', 'vector', 'advanced', 'debug']);
+
+export type SearchPanelState = {
+  tab: SearchTab;
+  sortAttr: string;
+  sortOrder: 'asc' | 'desc';
+  filterAttr: string;
+  filterOp: FilterOp;
+  filterValue: string;
+  filterValueTo: string;
+  filterJoin: 'AND' | 'OR';
+};
+
+export const EMPTY_SEARCH_PANEL: SearchPanelState = {
+  tab: 'filter',
+  sortAttr: '',
+  sortOrder: 'asc',
+  filterAttr: '',
+  filterOp: '=',
+  filterValue: '',
+  filterValueTo: '',
+  filterJoin: 'AND'
+};
+
+export type SearchDraft = {
+  mode: 'form' | 'json';
+  form: SearchFormState;
+  jsonText: string;
+  panel: SearchPanelState;
+};
+
+function asText(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+export function normalizeSearchPanel(raw: unknown): SearchPanelState {
+  const source = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  const tab = asText(source.tab);
+  const filterOp = asText(source.filterOp);
+  const sortOrder = asText(source.sortOrder);
+  const filterJoin = asText(source.filterJoin);
+  return {
+    tab: SEARCH_TABS.has(tab as SearchTab) ? (tab as SearchTab) : 'filter',
+    sortAttr: asText(source.sortAttr),
+    sortOrder: sortOrder === 'desc' ? 'desc' : 'asc',
+    filterAttr: asText(source.filterAttr),
+    filterOp: (FILTER_OPS as readonly string[]).includes(filterOp) ? (filterOp as FilterOp) : '=',
+    filterValue: asText(source.filterValue),
+    filterValueTo: asText(source.filterValueTo),
+    filterJoin: filterJoin === 'OR' ? 'OR' : 'AND'
+  };
+}
+
+const MATCHING = new Set(['', 'last', 'all', 'frequency']);
+const NETWORK = new Set(['', 'true', 'false']);
+
+export function normalizeSearchForm(raw: unknown): SearchFormState {
+  const next: SearchFormState = { ...EMPTY_SEARCH_FORM };
+  if (!raw || typeof raw !== 'object') return next;
+  const source = raw as Record<string, unknown>;
+  for (const key of Object.keys(EMPTY_SEARCH_FORM) as (keyof SearchFormState)[]) {
+    const value = source[key];
+    if (typeof next[key] === 'boolean') {
+      if (typeof value === 'boolean') (next[key] as boolean) = value;
+      continue;
+    }
+    if (typeof value !== 'string') continue;
+    if (key === 'matchingStrategy' && !MATCHING.has(value)) continue;
+    if (key === 'useNetwork' && !NETWORK.has(value)) continue;
+    (next[key] as string) = value;
+  }
+  if (next.mediaJson.length > 500) next.mediaJson = '';
+  if (next.vector.length > 200) next.vector = '';
+  return next;
+}
+
+function draftKey(profileId: string, indexUid: string): string {
+  return `${DRAFT_PREFIX}${profileId}:${indexUid}`;
+}
+
+export function loadSearchDraft(profileId: string, indexUid: string): SearchDraft | null {
+  if (!profileId || !indexUid) return null;
+  try {
+    const raw = localStorage.getItem(draftKey(profileId, indexUid));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { mode?: unknown; form?: unknown; jsonText?: unknown; panel?: unknown };
+    return {
+      mode: parsed.mode === 'json' ? 'json' : 'form',
+      form: normalizeSearchForm(parsed.form),
+      jsonText: typeof parsed.jsonText === 'string' ? parsed.jsonText.slice(0, 20000) : '',
+      panel: normalizeSearchPanel(parsed.panel)
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function saveSearchDraft(profileId: string, indexUid: string, draft: Omit<SearchDraft, 'panel'> & { panel?: SearchPanelState }): void {
+  if (!profileId || !indexUid) return;
+  const slim: SearchDraft = {
+    mode: draft.mode === 'json' ? 'json' : 'form',
+    form: normalizeSearchForm(draft.form),
+    jsonText: draft.jsonText.slice(0, 20000),
+    panel: normalizeSearchPanel(draft.panel)
+  };
+  try {
+    localStorage.setItem(draftKey(profileId, indexUid), JSON.stringify(slim));
+  } catch {
+    // quota or private mode: the open form still works
+  }
+}
+
+export function loadLastIndex(profileId: string): string {
+  if (!profileId) return '';
+  try {
+    return localStorage.getItem(LAST_INDEX_PREFIX + profileId) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+export function saveLastIndex(profileId: string, indexUid: string): void {
+  if (!profileId || !indexUid) return;
+  try {
+    localStorage.setItem(LAST_INDEX_PREFIX + profileId, indexUid);
+  } catch {
+    // quota or private mode: the in-memory select still works
+  }
+}
 
 export function loadHistory(indexUid: string): SearchHistoryItem[] {
   try {
@@ -27,11 +175,29 @@ export function loadHistory(indexUid: string): SearchHistoryItem[] {
   }
 }
 
+function slimHistoryItem(item: SearchHistoryItem): SearchHistoryItem {
+  const form = { ...item.form };
+  if (form.mediaJson.length > 500) form.mediaJson = '';
+  if (form.vector.length > 200) form.vector = '';
+  const query = { ...item.query };
+  delete query.media;
+  if (Array.isArray(query.vector) && query.vector.length > 32) delete query.vector;
+  return { ...item, form, query };
+}
+
 export function pushHistory(item: Omit<SearchHistoryItem, 'at'> & { at?: number }): SearchHistoryItem[] {
-  const next: SearchHistoryItem = { ...item, at: item.at ?? Date.now() };
-  const items = [next, ...loadHistory(item.indexUid)].slice(0, MAX);
-  localStorage.setItem(PREFIX + item.indexUid, JSON.stringify(items));
-  return items;
+  const next = slimHistoryItem({ ...item, at: item.at ?? Date.now() });
+  let items = [next, ...loadHistory(item.indexUid)].slice(0, MAX);
+  const key = PREFIX + item.indexUid;
+  while (items.length) {
+    try {
+      localStorage.setItem(key, JSON.stringify(items));
+      return items;
+    } catch {
+      items = items.slice(0, -1);
+    }
+  }
+  return [next];
 }
 
 export function compareHitIds(a: string[], b: string[]): {
@@ -49,19 +215,31 @@ export function compareHitIds(a: string[], b: string[]): {
   return { onlyA, onlyB, orderChanged };
 }
 
-export function scoresFromHits(hits: Record<string, unknown>[]): Record<string, number | null> {
-  const out: Record<string, number | null> = {};
+export function snapsFromHits(
+  hits: Record<string, unknown>[],
+  primaryKey?: string | null
+): Pick<SearchHistoryItem, 'hitIds' | 'hitLabels' | 'hitScores'> {
+  const hitIds: string[] = [];
+  const hitLabels: Record<string, string> = {};
+  const hitScores: Record<string, number | null> = {};
   for (const hit of hits) {
-    const id = rowId(hit);
+    const id = documentKey(hit, primaryKey);
     if (!id) continue;
+    hitIds.push(id);
+    hitLabels[id] = rowLabel(hit) || id;
     const score = hit._rankingScore;
-    out[id] = typeof score === 'number' ? score : null;
+    hitScores[id] = typeof score === 'number' ? score : null;
   }
-  return out;
+  return { hitIds, hitLabels, hitScores };
+}
+
+export function scoresFromHits(hits: Record<string, unknown>[], primaryKey?: string | null): Record<string, number | null> {
+  return snapsFromHits(hits, primaryKey).hitScores ?? {};
 }
 
 export type SearchRunDoc = {
   id: string;
+  label: string;
   rankA: number | null;
   rankB: number | null;
   rankDelta: number | null;
@@ -85,6 +263,7 @@ export function compareSearchRuns(a: SearchHistoryItem, b: SearchHistoryItem): S
   const rankB = new Map(idsB.map((id, i) => [id, i + 1]));
   const scoresA = a.hitScores ?? {};
   const scoresB = b.hitScores ?? {};
+  const labels = { ...(a.hitLabels ?? {}), ...(b.hitLabels ?? {}) };
   const docs: SearchRunDoc[] = [...new Set([...idsA, ...idsB])].map((id) => {
     const ra = rankA.get(id) ?? null;
     const rb = rankB.get(id) ?? null;
@@ -92,6 +271,7 @@ export function compareSearchRuns(a: SearchHistoryItem, b: SearchHistoryItem): S
     const sb = typeof scoresB[id] === 'number' ? scoresB[id]! : null;
     return {
       id,
+      label: labels[id] || id,
       rankA: ra,
       rankB: rb,
       rankDelta: ra != null && rb != null ? rb - ra : null,

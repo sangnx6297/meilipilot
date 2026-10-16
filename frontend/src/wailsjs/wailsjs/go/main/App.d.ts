@@ -16,6 +16,8 @@ export function ForwardFor(arg1:string,arg2:string,arg3:string,arg4:Record<strin
 
 export function ListProfiles():Promise<Array<main.ProfileDTO>>;
 
+export function OpenTextFile():Promise<string>;
+
 export function SaveTextFile(arg1:string,arg2:string):Promise<string>;
 
 export function Session():Promise<main.SessionDTO>;

@@ -7,7 +7,8 @@ import {
   DeleteProfile,
   CopyText,
   ForwardFor,
-  SaveTextFile
+  SaveTextFile,
+  OpenTextFile
 } from '../../wailsjs/go/main/App';
 
 export type Environment = 'dev' | 'staging' | 'production' | 'custom';
@@ -65,6 +66,10 @@ export async function copyText(text: string): Promise<void> {
 
 export async function saveTextFile(defaultName: string, content: string): Promise<string> {
   return SaveTextFile(defaultName, content);
+}
+
+export async function openTextFile(): Promise<string> {
+  return OpenTextFile();
 }
 
 export async function forwardFor(

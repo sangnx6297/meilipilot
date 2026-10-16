@@ -30,6 +30,10 @@ export function ListProfiles() {
   return window['go']['main']['App']['ListProfiles']();
 }
 
+export function OpenTextFile() {
+  return window['go']['main']['App']['OpenTextFile']();
+}
+
 export function SaveTextFile(arg1, arg2) {
   return window['go']['main']['App']['SaveTextFile'](arg1, arg2);
 }

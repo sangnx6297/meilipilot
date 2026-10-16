@@ -4,6 +4,7 @@
   import { confirmBody } from '../lib/ui/confirm-copy';
   import ConfirmDialog from '../lib/ui/ConfirmDialog.svelte';
   import EmptyState from '../lib/ui/EmptyState.svelte';
+  import FlagSwitch from '../lib/ui/FlagSwitch.svelte';
   import ErrorBanner from '../lib/ui/ErrorBanner.svelte';
   import JsonEditor from '../lib/ui/JsonEditor.svelte';
   import PageHeader from '../lib/ui/PageHeader.svelte';
@@ -25,7 +26,8 @@
 </script>
 <PageHeader title="Search rules" />
 {#if !shell.caps.rules}
-  <EmptyState title="Search rules không hỗ trợ" hint="Cần Meilisearch ≥ 1.53." />
+  <EmptyState title="Search rules tắt" hint="Bật dynamicSearchRules để ghim, ẩn, nhân điểm document." />
+  <div class="mt-3"><FlagSwitch name="dynamicSearchRules" /></div>
 {:else}
 <ErrorBanner {error} />
 <div class="card bg-base-100 shadow-sm mb-4">

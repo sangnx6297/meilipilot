@@ -1,16 +1,41 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { listIndexes } from '../lib/api/indexes';
+  import { getIndex, getIndexStats, listIndexes, listIndexFields } from '../lib/api/indexes';
+  import { asFieldPage, type IndexField } from '../lib/api/index-fields';
+  import { getSettings } from '../lib/api/settings';
+  import { MeiliError } from '../lib/api/client';
   import { compactSearchQuery, searchIndex, facetSearch, similarDocuments } from '../lib/api/search';
-  import { EMPTY_SEARCH_FORM, formToSearchQuery, type SearchFormState } from '../lib/api/search-form';
+  import { flagOn } from '../lib/api/capability';
+  import { EMPTY_SEARCH_FORM, formToSearchQuery, parseSearchBody, queryToForm, type SearchFormState } from '../lib/api/search-form';
+  import {
+    appendFilter,
+    appendSort,
+    buildSearchCatalog,
+    facetsForQuery,
+    fieldsFromFallback,
+    filterClause,
+    opsForField,
+    toggleFilter,
+    type FilterOp
+  } from '../lib/api/search-fields';
+  import { SEARCH_TAB_LABELS, searchTabs, type SearchTab } from '../lib/api/search-layout';
+  import { mediaFromImageFile, mediaJsonFromImageUrl, splitDataUrl } from '../lib/experimental';
+  import { shellReader } from '../lib/ui/shell-context';
+  import FieldChips from '../lib/ui/FieldChips.svelte';
+  import JsonEditor from '../lib/ui/JsonEditor.svelte';
   import type { SearchQuery, SearchResult } from '../lib/api/types';
-  import { rowId } from '../lib/ui/hits';
   import {
     compareHitIds,
     compareSearchRuns,
+    findSnapshot,
     loadHistory,
+    loadLastIndex,
+    loadSearchDraft,
     pushHistory,
-    scoresFromHits,
+    saveLastIndex,
+    saveSearchDraft,
+    snapshotKey,
+    snapsFromHits,
     type SearchHistoryItem
   } from '../lib/ui/search-history';
   import ErrorBanner from '../lib/ui/ErrorBanner.svelte';
@@ -35,53 +60,274 @@
   let lastQuery = $state<SearchQuery | null>(null);
   let history = $state<SearchHistoryItem[]>([]);
   let hitCompare = $state<ReturnType<typeof compareHitIds> | null>(null);
-  let snapA = $state('1');
-  let snapB = $state('0');
-  const ADVANCED_KEY = 'meili.searchAdvanced';
-  let advanced = $state(localStorage.getItem(ADVANCED_KEY) === '1');
+  let snapA = $state('');
+  let snapB = $state('');
+  let primaryKey = $state<string | null>(null);
+  let snapIndex = '';
+  let draftIndex = '';
+  let fieldsReadyFor = '';
+  let appliedTabFor = '';
+  let mode = $state<'form' | 'json'>('form');
+  let tab = $state<SearchTab>('filter');
+  let showRequest = $state(false);
+  let showResponse = $state(false);
+  let showCompare = $state(false);
+  let jsonText = $state('');
+  let jsonError = $state('');
+  let indexFields = $state<IndexField[]>([]);
+  let embedderNames = $state<string[]>([]);
+  let fieldSource = $state('');
+  let filterAttr = $state('');
+  let filterOp = $state<FilterOp>('=');
+  let filterValue = $state('');
+  let filterValueTo = $state('');
+  let filterJoin = $state<'AND' | 'OR'>('AND');
+  let sortAttr = $state('');
+  let sortOrder = $state<'asc' | 'desc'>('asc');
+  let imageUrl = $state('');
+  let facetPane = $state<HTMLDivElement | null>(null);
+  let facetJump = $state('');
+  const catalog = $derived(buildSearchCatalog(indexFields));
+  const readShell = shellReader();
+  const shell = $derived(readShell());
+  const activeFilterField = $derived(catalog.filterable.find((field) => field.name === filterAttr));
+  const filterOps = $derived(opsForField(activeFilterField, flagOn(shell.caps, 'containsFilter')));
+  const filterNeedsValue = $derived(
+    !['EXISTS', 'NOT EXISTS', 'IS NULL', 'IS NOT NULL', 'IS EMPTY', 'IS NOT EMPTY'].includes(filterOp)
+  );
+  const tabs = $derived(
+    searchTabs({
+      filterable: catalog.filterable.length,
+      sortable: catalog.sortable.length,
+      facets: catalog.facets.length,
+      retrieve: catalog.retrieve.length,
+      searchOn: catalog.searchOn.length,
+      locales: catalog.locales.length,
+      embedders: embedderNames.length,
+      media: flagOn(shell.caps, 'multimodal'),
+      filterText: form.filter,
+      sortText: form.sort,
+      facetText: form.facets,
+      distinctText: form.distinct,
+      localeText: form.locales,
+      retrieveText: form.attributesToRetrieve,
+      searchOnText: form.attributesToSearchOn,
+      embedderText: form.hybridEmbedder,
+      mediaText: form.mediaJson
+    })
+  );
   const pair = $derived.by(() => {
-    const a = history[Number(snapA)];
-    const b = history[Number(snapB)];
-    if (!a || !b || Number(snapA) === Number(snapB)) return null;
+    const a = findSnapshot(history, snapA);
+    const b = findSnapshot(history, snapB);
+    if (!a || !b || a === b) return null;
     return compareSearchRuns(a, b);
   });
 
-  function setAdvanced(on: boolean) {
-    advanced = on;
-    localStorage.setItem(ADVANCED_KEY, on ? '1' : '0');
+  function selectSnapshots(items: SearchHistoryItem[]) {
+    snapB = items[0] ? snapshotKey(items[0], 0) : '';
+    snapA = items[1] ? snapshotKey(items[1], 1) : snapB;
   }
 
   $effect(() => {
-    if (indexUid) history = loadHistory(indexUid);
+    if (!indexUid || fieldsReadyFor !== indexUid) return;
+    if (appliedTabFor !== indexUid) {
+      appliedTabFor = indexUid;
+      const savedTab = loadSearchDraft(shell.session?.id ?? '', indexUid)?.panel.tab;
+      if (savedTab && tabs.includes(savedTab)) {
+        tab = savedTab;
+        return;
+      }
+    }
+    if (!tabs.includes(tab) && tabs[0]) tab = tabs[0];
+  });
+
+  function setMode(next: 'form' | 'json') {
+    if (next === mode) return;
+    if (next === 'json') {
+      try {
+        jsonText = JSON.stringify(formToSearchQuery(form), null, 2);
+        jsonError = '';
+        mode = 'json';
+      } catch (e) {
+        error = e;
+      }
+      return;
+    }
+    try {
+      form = { ...EMPTY_SEARCH_FORM, ...queryToForm(parseSearchBody(jsonText)) };
+      jsonError = '';
+      mode = 'form';
+    } catch (e) {
+      jsonError = e instanceof Error ? e.message : 'JSON không hợp lệ';
+    }
+  }
+
+  function applyFilterRow() {
+    const clause = filterClause({ attr: filterAttr, op: filterOp, value: filterValue, valueTo: filterValueTo });
+    form.filter = appendFilter(form.filter, clause, filterJoin);
+  }
+
+  $effect(() => {
+    if (!filterOps.includes(filterOp)) filterOp = filterOps[0] ?? '=';
+  });
+
+  $effect(() => {
+    const current = indexUid;
+    if (!current) return;
+    fieldsReadyFor = '';
+    let stale = false;
+    void (async () => {
+      const [fieldsResult, settingsResult, statsResult, indexResult] = await Promise.allSettled([
+        (async () => {
+          const collected: IndexField[] = [];
+          let offset = 0;
+          for (let page = 0; page < 10; page += 1) {
+            const chunk = asFieldPage(await listIndexFields(current, offset, 200));
+            collected.push(...chunk.results);
+            if (!chunk.results.length || collected.length >= chunk.total) break;
+            offset += chunk.results.length;
+          }
+          return collected;
+        })(),
+        getSettings(current),
+        getIndexStats(current),
+        getIndex(current)
+      ]);
+      if (stale) return;
+      primaryKey = indexResult.status === 'fulfilled' ? indexResult.value.primaryKey : null;
+      const settings = settingsResult.status === 'fulfilled' ? settingsResult.value : null;
+      embedderNames = settings?.embedders ? Object.keys(settings.embedders) : [];
+      if (fieldsResult.status === 'fulfilled' && fieldsResult.value.length) {
+        indexFields = fieldsResult.value;
+        fieldSource = 'fields';
+        fieldsReadyFor = current;
+        return;
+      }
+      const names = statsResult.status === 'fulfilled' ? Object.keys(statsResult.value.fieldDistribution ?? {}) : [];
+      indexFields = fieldsFromFallback(names, settings);
+      fieldSource = indexFields.length ? 'stats' : '';
+      fieldsReadyFor = current;
+    })();
+    return () => {
+      stale = true;
+    };
+  });
+
+  $effect(() => {
+    const profileId = shell.session?.id ?? '';
+    const current = indexUid;
+    if (!profileId || !current) return;
+    saveLastIndex(profileId, current);
+  });
+
+  $effect(() => {
+    const profileId = shell.session?.id ?? '';
+    const current = indexUid;
+    if (!profileId || !current || draftIndex !== current) return;
+    saveSearchDraft(profileId, current, {
+      mode,
+      form: { ...form },
+      jsonText,
+      panel: { tab, sortAttr, sortOrder, filterAttr, filterOp, filterValue, filterValueTo, filterJoin }
+    });
+  });
+
+  $effect(() => {
+    const profileId = shell.session?.id ?? '';
+    const current = indexUid;
+    if (!profileId || !current || draftIndex === current) return;
+    const previous = draftIndex;
+    draftIndex = current;
+    const saved = loadSearchDraft(profileId, current);
+    if (saved) {
+      form = saved.form;
+      mode = saved.mode;
+      jsonText = saved.jsonText;
+      tab = saved.panel.tab;
+      sortAttr = saved.panel.sortAttr;
+      sortOrder = saved.panel.sortOrder;
+      filterAttr = saved.panel.filterAttr;
+      filterOp = saved.panel.filterOp;
+      filterValue = saved.panel.filterValue;
+      filterValueTo = saved.panel.filterValueTo;
+      filterJoin = saved.panel.filterJoin;
+      jsonError = '';
+      return;
+    }
+    if (!previous) return;
+    form = { ...EMPTY_SEARCH_FORM };
+    mode = 'form';
+    jsonText = '';
+    tab = 'filter';
+    sortAttr = '';
+    sortOrder = 'asc';
+    filterAttr = '';
+    filterOp = '=';
+    filterValue = '';
+    filterValueTo = '';
+    filterJoin = 'AND';
+    jsonError = '';
+  });
+
+  $effect(() => {
+    const uid = indexUid;
+    if (!uid) return;
+    const items = loadHistory(uid);
+    history = items;
+    if (snapIndex === uid) return;
+    snapIndex = uid;
+    selectSnapshots(items);
   });
 
   onMount(async () => {
     const page = await listIndexes(0, 100);
     indexes = page.results.map((i) => i.uid);
-    if (!indexUid && indexes[0]) indexUid = indexes[0];
+    if (indexUid) return;
+    const remembered = loadLastIndex(shell.session?.id ?? '');
+    if (remembered && indexes.includes(remembered)) {
+      indexUid = remembered;
+      return;
+    }
+    if (indexes[0]) indexUid = indexes[0];
   });
 
   async function run() {
-    if (!indexUid) return;
+    if (!indexUid) {
+      error = new Error('Chưa chọn index');
+      return;
+    }
     error = null;
     try {
-      const query = compactSearchQuery({ ...formToSearchQuery(form), showRankingScore: true });
+      const query = compactSearchQuery(mode === 'json' ? parseSearchBody(jsonText) : formToSearchQuery(form));
+      if (mode === 'form') query.facets = facetsForQuery(query.facets, catalog.facets);
+      if (mode === 'json') form = { ...EMPTY_SEARCH_FORM, ...queryToForm(query) };
+      let response;
+      try {
+        response = await searchIndex(indexUid, query);
+      } catch (e) {
+        const facetFailed = e instanceof MeiliError && e.code.toLowerCase().includes('facet') && !!query.facets?.length;
+        if (!facetFailed) throw e;
+        delete query.facets;
+        response = await searchIndex(indexUid, query);
+      }
       lastQuery = query;
-      result = await searchIndex(indexUid, query);
-      const ids = result.hits.map(rowId).filter(Boolean);
-      const prev = history[0];
-      history = pushHistory({
-        indexUid,
-        form: $state.snapshot(form),
-        query,
-        processingTimeMs: result.processingTimeMs,
-        hitCount: result.estimatedTotalHits ?? result.totalHits ?? result.hits.length,
-        hitIds: ids,
-        hitScores: scoresFromHits(result.hits)
-      });
-      hitCompare = prev ? compareHitIds(prev.hitIds ?? [], ids) : null;
-      snapB = '0';
-      snapA = history.length > 1 ? '1' : '0';
+      result = response;
+      try {
+        const snaps = snapsFromHits(response.hits ?? [], primaryKey);
+        const prev = history[0];
+        history = pushHistory({
+          indexUid,
+          form: $state.snapshot(form),
+          query,
+          processingTimeMs: response.processingTimeMs,
+          hitCount: response.estimatedTotalHits ?? response.totalHits ?? response.hits.length,
+          ...snaps
+        });
+        hitCompare = prev ? compareHitIds(prev.hitIds ?? [], snaps.hitIds ?? []) : null;
+        selectSnapshots(history);
+      } catch {
+        // Kết quả search vẫn giữ khi không lưu được snapshot.
+      }
     } catch (e) {
       error = e;
     }
@@ -128,385 +374,490 @@
     }
   }
 
+  function facetClause(attr: string, value: string): string {
+    return filterClause({ attr, op: '=', value, valueTo: '' });
+  }
+
+  function jumpFacet(name: string) {
+    facetJump = name;
+    const root = facetPane;
+    const target = root?.querySelector(`[data-facet="${CSS.escape(name)}"]`);
+    if (!root || !(target instanceof HTMLElement)) return;
+    const top = target.getBoundingClientRect().top - root.getBoundingClientRect().top + root.scrollTop;
+    root.scrollTo({ top: Math.max(0, top - 4), behavior: 'smooth' });
+  }
+
   function applyFacet(attr: string, value: string) {
-    form.filter = form.filter ? `${form.filter} AND ${attr} = "${value}"` : `${attr} = "${value}"`;
+    const clause = facetClause(attr, value);
+    if (!clause) return;
+    form.filter = toggleFilter(form.filter, clause);
     void run();
   }
 </script>
 
-<PageHeader title="Search" hint="POST /indexes/{'{uid}'}/search — Ctrl+Enter" />
+<PageHeader title="Search" hint="Chỉ hiện phần index đã cấu hình. Ctrl+Enter" />
 {#if uid}
   <IndexContext {uid} active="search" />
 {/if}
 <ErrorBanner {error} />
-<form class="card bg-base-100 mb-4" onkeydown={onCardKey} onsubmit={(e) => { e.preventDefault(); void run(); }}>
-  <div class="card-body p-4 gap-3">
-    <div class="flex min-w-0 items-center gap-2">
+<form class="card bg-base-100 mb-4 shadow-sm" onkeydown={onCardKey} onsubmit={(e) => { e.preventDefault(); void run(); }}>
+  <div class="card-body gap-3 p-4">
+    <div class="flex min-w-0 flex-wrap items-end gap-2">
       <select class="select select-bordered select-sm w-44 shrink-0" bind:value={indexUid} title="index uid">
         {#if !indexes.length}<option value="">— chọn index —</option>{/if}
         {#each indexes as i}<option value={i}>{i}</option>{/each}
       </select>
-      <input
-        class="input input-bordered input-sm min-w-0 flex-1"
-        placeholder="Từ khóa tìm kiếm (q)"
-        bind:value={form.q}
-        onkeydown={(e) => e.key === 'Enter' && run()}
-      />
-      <button class="btn btn-primary btn-sm shrink-0" type="submit" title="Ctrl+Enter">Search</button>
-      <label class="flex shrink-0 cursor-pointer items-center gap-2 select-none">
-        <span class="text-sm">Advanced</span>
-        <input
-          type="checkbox"
-          role="switch"
-          class="toggle toggle-sm toggle-primary"
-          checked={advanced}
-          aria-label="Advanced"
-          onchange={(e) => setAdvanced((e.currentTarget as HTMLInputElement).checked)}
-        />
-      </label>
+      {#if mode === 'form'}
+        <div class="flex min-w-0 flex-1 flex-col gap-1">
+          <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
+            <label class="flex cursor-pointer items-center gap-1.5 text-xs text-base-content">
+              <input type="checkbox" class="checkbox checkbox-xs" bind:checked={form.showRankingScore} />
+              showRankingScore
+            </label>
+            <label class="flex cursor-pointer items-center gap-1.5 text-xs text-base-content {form.showRankingScore ? '' : 'opacity-50'}">
+              <input type="checkbox" class="checkbox checkbox-xs" bind:checked={form.showRankingScoreDetails} disabled={!form.showRankingScore} />
+              showRankingScoreDetails
+            </label>
+          </div>
+          <input class="input input-bordered input-sm min-w-0" placeholder="Từ khóa tìm kiếm" bind:value={form.q} onkeydown={(e) => e.key === 'Enter' && run()} />
+        </div>
+      {/if}
+      <div class="join shrink-0">
+        <button class="btn btn-sm join-item {mode === 'form' ? 'btn-primary' : 'btn-ghost'}" type="button" onclick={() => setMode('form')}>Form</button>
+        <button class="btn btn-sm join-item {mode === 'json' ? 'btn-primary' : 'btn-ghost'}" type="button" onclick={() => setMode('json')}>JSON</button>
+      </div>
     </div>
 
-    {#if advanced}
-    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-      <label class="form-control">
-        <span class="label py-1"><span class="label-text text-xs font-mono">filter</span></span>
-        <input class="input input-bordered input-sm" placeholder='genres = action AND year > 2000' bind:value={form.filter} />
-      </label>
-      <label class="form-control">
-        <span class="label py-1"><span class="label-text text-xs font-mono">sort</span><span class="label-text-alt text-[10px]">attr:asc, attr:desc</span></span>
-        <input class="input input-bordered input-sm" placeholder="year:desc" bind:value={form.sort} />
-      </label>
-      <label class="form-control">
-        <span class="label py-1"><span class="label-text text-xs font-mono">facets</span></span>
-        <input class="input input-bordered input-sm" placeholder="genres, year" bind:value={form.facets} />
-      </label>
-      <label class="form-control">
-        <span class="label py-1"><span class="label-text text-xs font-mono">matchingStrategy</span></span>
-        <select class="select select-bordered select-sm" bind:value={form.matchingStrategy}>
-          <option value="">(default)</option>
-          <option value="last">last</option>
-          <option value="all">all</option>
-          <option value="frequency">frequency</option>
-        </select>
-      </label>
+    {#if mode === 'json'}
+      <p class="text-xs text-base-content/55">Body POST /indexes/{indexUid || '{uid}'}/search. Field lạ bị bỏ khi search.</p>
+      <JsonEditor value={jsonText} rows={16} onchange={(text) => { jsonText = text; jsonError = ''; }} />
+      {#if jsonError}<p class="text-error text-xs">{jsonError}</p>{/if}
+    {:else}
+      <div role="tablist" class="tabs tabs-box tabs-sm w-fit max-w-full flex-wrap">
+        {#each tabs as id (id)}
+          <button class="tab" class:tab-active={tab === id} type="button" role="tab" onclick={() => (tab = id)}>{SEARCH_TAB_LABELS[id]}</button>
+        {/each}
+      </div>
+
+      <div class="rounded-box bg-base-200/40 p-3">
+        {#if tab === 'filter'}
+          <div class="grid grid-cols-1 gap-3 lg:grid-cols-2">
+            {#if catalog.filterable.length || form.filter.trim()}
+              <div class="flex flex-col gap-2 lg:col-span-2">
+                <p class="text-xs font-medium">Filter</p>
+                <div class="flex flex-wrap items-end gap-1">
+                  <input class="input input-bordered input-sm w-40" list="search-filter-fields" placeholder="field" bind:value={filterAttr} />
+                  <datalist id="search-filter-fields">
+                    {#each catalog.filterable as field}<option value={field.name}></option>{/each}
+                  </datalist>
+                  <select class="select select-bordered select-sm w-36" bind:value={filterOp}>
+                    {#each filterOps as op}<option value={op}>{op}</option>{/each}
+                  </select>
+                  {#if filterNeedsValue}
+                    <input class="input input-bordered input-sm min-w-32 flex-1" placeholder={filterOp === 'IN' ? 'a, b' : 'giá trị'} bind:value={filterValue} />
+                  {/if}
+                  {#if filterOp === 'TO'}
+                    <input class="input input-bordered input-sm w-28" placeholder="đến" bind:value={filterValueTo} />
+                  {/if}
+                  <select class="select select-bordered select-sm w-20" bind:value={filterJoin}>
+                    <option value="AND">AND</option>
+                    <option value="OR">OR</option>
+                  </select>
+                  <button class="btn btn-outline btn-sm" type="button" onclick={applyFilterRow}>Thêm</button>
+                </div>
+                <input class="input input-bordered input-sm" placeholder='genres = "action" AND year >= 2000' bind:value={form.filter} />
+              </div>
+            {/if}
+            {#if catalog.sortable.length || form.sort.trim()}
+              <div class="flex flex-col gap-2">
+                <p class="text-xs font-medium">Sort</p>
+                <div class="flex min-w-0 items-center gap-1">
+                  <select class="select select-bordered select-sm min-w-0 flex-1" bind:value={sortAttr}>
+                    <option value="">Chọn field</option>
+                    {#each catalog.sortable as name (name)}
+                      <option value={name}>{name}</option>
+                    {/each}
+                    {#if sortAttr && !catalog.sortable.includes(sortAttr)}
+                      <option value={sortAttr}>{sortAttr}</option>
+                    {/if}
+                  </select>
+                  <select class="select select-bordered select-sm w-24 shrink-0" bind:value={sortOrder}>
+                    <option value="asc">asc</option>
+                    <option value="desc">desc</option>
+                  </select>
+                  <button class="btn btn-outline btn-sm shrink-0" type="button" disabled={!sortAttr.trim()} onclick={() => (form.sort = appendSort(form.sort, sortAttr, sortOrder))}>Thêm</button>
+                </div>
+                <input class="input input-bordered input-sm" placeholder="year:desc" bind:value={form.sort} />
+              </div>
+            {/if}
+          </div>
+        {:else if tab === 'facet'}
+          <div class="flex flex-col gap-3">
+            <div>
+              <p class="mb-1 text-xs font-medium">Facet trong setting</p>
+              <p class="mb-2 text-[11px] text-base-content/50">Để trống thì search gửi mọi facet filterable. Bấm giá trị ở cột kết quả để lọc.</p>
+              <FieldChips names={catalog.facets} value={form.facets} onchange={(value) => (form.facets = value)} />
+              <input class="input input-bordered input-sm mt-2 w-full" placeholder="trống = mọi facet" bind:value={form.facets} />
+            </div>
+            <div class="border-t border-base-300 pt-3">
+              <p class="mb-2 text-xs font-medium">Facet search</p>
+              <div class="flex min-w-0 flex-wrap gap-2">
+                <input class="input input-bordered input-sm min-w-0 flex-1" list="search-facet-names" placeholder="facetName" bind:value={facetName} />
+                <datalist id="search-facet-names">
+                  {#each catalog.facets as name}<option value={name}></option>{/each}
+                </datalist>
+                <input class="input input-bordered input-sm min-w-0 flex-1" placeholder="facetQuery" bind:value={facetQuery} />
+                <button class="btn btn-outline btn-sm shrink-0" type="button" onclick={runFacet}>Tìm giá trị</button>
+              </div>
+              {#if facetHits.length}
+                <div class="mt-2 flex flex-wrap gap-1">
+                  {#each facetHits as hit}
+                    <button class="btn btn-xs btn-ghost" type="button" onclick={() => applyFacet(facetName, hit.value)}>{hit.value} ({hit.count})</button>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          </div>
+        {:else if tab === 'display'}
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {#if catalog.retrieve.length || form.attributesToRetrieve.trim()}
+              <label class="form-control">
+                <span class="label py-1"><span class="label-text text-xs">attributesToRetrieve</span></span>
+                <FieldChips names={catalog.retrieve} value={form.attributesToRetrieve} onchange={(value) => (form.attributesToRetrieve = value)} />
+                <input class="input input-bordered input-sm" placeholder="*, id, title" bind:value={form.attributesToRetrieve} />
+              </label>
+            {/if}
+            {#if catalog.searchOn.length || form.attributesToSearchOn.trim()}
+              <label class="form-control">
+                <span class="label py-1"><span class="label-text text-xs">attributesToSearchOn</span></span>
+                <FieldChips names={catalog.searchOn} value={form.attributesToSearchOn} onchange={(value) => (form.attributesToSearchOn = value)} />
+                <input class="input input-bordered input-sm" placeholder="title, overview" bind:value={form.attributesToSearchOn} />
+              </label>
+            {/if}
+            {#if catalog.filterable.length || form.distinct.trim()}
+              <label class="form-control">
+                <span class="label py-1"><span class="label-text text-xs">distinct</span></span>
+                <input class="input input-bordered input-sm" list="search-distinct-fields" placeholder="product_id" bind:value={form.distinct} />
+                <datalist id="search-distinct-fields">
+                  {#each catalog.facets as name}<option value={name}></option>{/each}
+                </datalist>
+              </label>
+            {/if}
+            {#if catalog.locales.length || form.locales.trim()}
+              <label class="form-control">
+                <span class="label py-1"><span class="label-text text-xs">locales</span></span>
+                <FieldChips names={catalog.locales} value={form.locales} onchange={(value) => (form.locales = value)} />
+                <input class="input input-bordered input-sm" placeholder="en, vi" bind:value={form.locales} />
+              </label>
+            {/if}
+            {#if catalog.retrieve.length || form.attributesToHighlight.trim() || form.attributesToCrop.trim()}
+              <label class="form-control sm:col-span-2">
+                <span class="label cursor-pointer justify-start gap-2 py-1">
+                  <input type="checkbox" class="checkbox checkbox-sm" bind:checked={form.highlightAll} />
+                  <span class="text-sm">Highlight tất cả field hiển thị</span>
+                </span>
+              </label>
+              <label class="form-control">
+                <span class="label py-1"><span class="label-text text-xs">attributesToHighlight</span></span>
+                <FieldChips names={catalog.retrieve} value={form.attributesToHighlight} onchange={(value) => (form.attributesToHighlight = value)} />
+                <input class="input input-bordered input-sm" placeholder="title, overview" bind:value={form.attributesToHighlight} />
+              </label>
+              <label class="form-control">
+                <span class="label py-1"><span class="label-text text-xs">attributesToCrop</span></span>
+                <FieldChips names={catalog.retrieve} value={form.attributesToCrop} onchange={(value) => (form.attributesToCrop = value)} />
+                <input class="input input-bordered input-sm" placeholder="overview" bind:value={form.attributesToCrop} />
+              </label>
+              <label class="form-control">
+                <span class="label py-1"><span class="label-text text-xs">highlightPreTag</span></span>
+                <input class="input input-bordered input-sm" placeholder="<em>" bind:value={form.highlightPreTag} />
+              </label>
+              <label class="form-control">
+                <span class="label py-1"><span class="label-text text-xs">highlightPostTag</span></span>
+                <input class="input input-bordered input-sm" placeholder="</em>" bind:value={form.highlightPostTag} />
+              </label>
+              <label class="form-control">
+                <span class="label py-1"><span class="label-text text-xs">cropLength</span></span>
+                <input class="input input-bordered input-sm" placeholder="10" bind:value={form.cropLength} />
+              </label>
+              <label class="form-control">
+                <span class="label py-1"><span class="label-text text-xs">cropMarker</span></span>
+                <input class="input input-bordered input-sm" placeholder="…" bind:value={form.cropMarker} />
+              </label>
+              <label class="label cursor-pointer justify-start gap-2">
+                <input type="checkbox" class="checkbox checkbox-sm" bind:checked={form.showMatchesPosition} />
+                <span class="text-sm">showMatchesPosition</span>
+              </label>
+            {/if}
+          </div>
+        {:else if tab === 'vector'}
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {#if embedderNames.length || form.hybridEmbedder.trim()}
+              <label class="form-control">
+                <span class="label py-1"><span class="label-text text-xs">hybrid.embedder</span></span>
+                <input class="input input-bordered input-sm" list="search-embedders" placeholder="default" bind:value={form.hybridEmbedder} />
+                <datalist id="search-embedders">
+                  {#each embedderNames as name}<option value={name}></option>{/each}
+                </datalist>
+              </label>
+              <label class="form-control">
+                <span class="label py-1"><span class="label-text text-xs">semanticRatio</span><span class="label-text-alt text-[10px]">0 keyword · 1 semantic</span></span>
+                <input class="input input-bordered input-sm" placeholder="0.5" bind:value={form.hybridSemanticRatio} />
+              </label>
+              <label class="form-control sm:col-span-2">
+                <span class="label py-1"><span class="label-text text-xs">vector</span></span>
+                <input class="input input-bordered input-sm" placeholder="0.1, 0.2, 0.3" bind:value={form.vector} />
+              </label>
+              <label class="label cursor-pointer justify-start gap-2">
+                <input type="checkbox" class="checkbox checkbox-sm" bind:checked={form.retrieveVectors} />
+                <span class="text-sm">retrieveVectors</span>
+              </label>
+            {/if}
+            {#if flagOn(shell.caps, 'multimodal') || form.mediaJson.trim()}
+              <label class="form-control sm:col-span-2">
+                <span class="label py-1"><span class="label-text text-xs">Ảnh</span><span class="label-text-alt text-[10px]">media.image.mime + data</span></span>
+                <input class="file-input file-input-bordered file-input-sm w-full" type="file" accept="image/*" onchange={(e) => {
+                  const file = e.currentTarget.files?.[0];
+                  if (!file) return;
+                  const reader = new FileReader();
+                  reader.onload = () => {
+                    const parts = splitDataUrl(String(reader.result ?? ''));
+                    if (!parts) return;
+                    form.mediaJson = mediaFromImageFile(parts.mime, parts.data);
+                  };
+                  reader.readAsDataURL(file);
+                }} />
+              </label>
+              <label class="form-control sm:col-span-2">
+                <span class="label py-1"><span class="label-text text-xs">URL ảnh</span></span>
+                <div class="flex gap-2">
+                  <input class="input input-bordered input-sm flex-1" placeholder="https://..." bind:value={imageUrl} />
+                  <button class="btn btn-outline btn-sm" type="button" disabled={!imageUrl.trim()} onclick={() => (form.mediaJson = mediaJsonFromImageUrl(imageUrl))}>Dùng URL</button>
+                </div>
+              </label>
+              <label class="form-control sm:col-span-2">
+                <span class="label py-1"><span class="label-text text-xs">media</span></span>
+                <textarea class="textarea textarea-bordered textarea-sm font-mono" rows="3" placeholder={'{ "image": { "mime": "...", "data": "..." } }'} bind:value={form.mediaJson}></textarea>
+              </label>
+            {/if}
+          </div>
+        {:else if tab === 'advanced'}
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <label class="form-control">
+              <span class="label py-1"><span class="label-text text-xs">offset</span></span>
+              <input class="input input-bordered input-sm" bind:value={form.offset} />
+            </label>
+            <label class="form-control">
+              <span class="label py-1"><span class="label-text text-xs">limit</span></span>
+              <input class="input input-bordered input-sm" bind:value={form.limit} />
+            </label>
+            <label class="form-control">
+              <span class="label py-1"><span class="label-text text-xs">page</span></span>
+              <input class="input input-bordered input-sm" placeholder="bỏ trống = offset" bind:value={form.page} />
+            </label>
+            <label class="form-control">
+              <span class="label py-1"><span class="label-text text-xs">hitsPerPage</span></span>
+              <input class="input input-bordered input-sm" bind:value={form.hitsPerPage} />
+            </label>
+            <label class="form-control">
+              <span class="label py-1"><span class="label-text text-xs">matchingStrategy</span></span>
+              <select class="select select-bordered select-sm" bind:value={form.matchingStrategy}>
+                <option value="">(default)</option>
+                <option value="last">last</option>
+                <option value="all">all</option>
+                <option value="frequency">frequency</option>
+              </select>
+            </label>
+            <label class="form-control">
+              <span class="label py-1"><span class="label-text text-xs">rankingScoreThreshold</span></span>
+              <input class="input input-bordered input-sm" placeholder="0.5" bind:value={form.rankingScoreThreshold} />
+            </label>
+            <label class="label cursor-pointer justify-start gap-2">
+              <input type="checkbox" class="checkbox checkbox-sm" bind:checked={form.showPerformanceDetails} />
+              <span class="text-sm">showPerformanceDetails</span>
+            </label>
+            {#if flagOn(shell.caps, 'network')}
+              <label class="form-control">
+                <span class="label py-1"><span class="label-text text-xs">useNetwork</span></span>
+                <select class="select select-bordered select-sm" bind:value={form.useNetwork}>
+                  <option value="">(default)</option>
+                  <option value="true">true</option>
+                  <option value="false">false</option>
+                </select>
+              </label>
+            {/if}
+            <label class="form-control sm:col-span-2">
+              <span class="label py-1"><span class="label-text text-xs">personalize.userContext</span></span>
+              <textarea class="textarea textarea-bordered textarea-sm" rows="2" placeholder="likes action movies" bind:value={form.personalizeUserContext}></textarea>
+            </label>
+            {#if flagOn(shell.caps, 'dynamicSearchRules')}
+              <label class="form-control sm:col-span-2 lg:col-span-4">
+                <span class="label py-1"><span class="label-text text-xs">inlineRule</span></span>
+                <textarea class="textarea textarea-bordered textarea-sm font-mono" rows="4" placeholder={'{ "uid": "...", "actions": [] }'} bind:value={form.inlineRuleJson}></textarea>
+              </label>
+            {/if}
+          </div>
+        {:else if tab === 'debug'}
+          <div class="flex flex-col gap-3">
+            <div class="flex flex-wrap gap-2">
+              <button class="btn btn-sm {showRequest ? 'btn-primary' : 'btn-outline'}" type="button" disabled={!lastQuery} onclick={() => (showRequest = !showRequest)}>Raw request</button>
+              <button class="btn btn-sm {showResponse ? 'btn-primary' : 'btn-outline'}" type="button" disabled={!result} onclick={() => (showResponse = !showResponse)}>Raw response</button>
+              <button class="btn btn-sm {showCompare ? 'btn-primary' : 'btn-outline'}" type="button" disabled={history.length < 2} onclick={() => (showCompare = !showCompare)}>So sánh snapshot</button>
+            </div>
+            {#if showRequest && lastQuery}
+              <CodeBlock value={lastQuery} />
+            {/if}
+            {#if showResponse && result}
+              <CodeBlock value={result} />
+              {#if result.performanceDetails}
+                <p class="text-xs font-medium">performanceDetails</p>
+                <CodeBlock value={result.performanceDetails} />
+              {/if}
+            {/if}
+            {#if showCompare}
+              <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <label class="form-control">
+                  <span class="mb-1 text-xs text-base-content/60">Run A</span>
+                  <select class="select select-bordered select-sm w-full" value={snapA} onchange={(e) => (snapA = e.currentTarget.value)}>
+                    {#each history as item, i (snapshotKey(item, i))}
+                      <option value={snapshotKey(item, i)} selected={snapA === snapshotKey(item, i)}>{new Date(item.at).toLocaleTimeString()} · q={item.query.q ?? ''} · {item.hitCount ?? 0} hits · {item.processingTimeMs ?? '—'}ms</option>
+                    {/each}
+                  </select>
+                </label>
+                <label class="form-control">
+                  <span class="mb-1 text-xs text-base-content/60">Run B</span>
+                  <select class="select select-bordered select-sm w-full" value={snapB} onchange={(e) => (snapB = e.currentTarget.value)}>
+                    {#each history as item, i (snapshotKey(item, i))}
+                      <option value={snapshotKey(item, i)} selected={snapB === snapshotKey(item, i)}>{new Date(item.at).toLocaleTimeString()} · q={item.query.q ?? ''} · {item.hitCount ?? 0} hits · {item.processingTimeMs ?? '—'}ms</option>
+                    {/each}
+                  </select>
+                </label>
+              </div>
+              {#if pair}
+                <p class="text-xs text-base-content/60">
+                  Latency A {pair.latencyA ?? '—'}ms → B {pair.latencyB ?? '—'}ms
+                  {#if pair.latencyDelta != null} · Δ {pair.latencyDelta > 0 ? '+' : ''}{pair.latencyDelta}ms{/if}
+                  ·
+                  {#if pair.ids.orderChanged}<span class="status-chip status-chip-processing">order đổi</span>{:else}<span class="status-chip status-chip-canceled">order giữ</span>{/if}
+                  {#if pair.ids.onlyA.length} · mất {pair.ids.onlyA.join(', ')}{/if}
+                  {#if pair.ids.onlyB.length} · thêm {pair.ids.onlyB.join(', ')}{/if}
+                </p>
+                <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
+                  <table class="table table-sm">
+                    <thead>
+                      <tr>
+                        <th>doc</th>
+                        <th class="text-right">Rank A</th>
+                        <th class="text-right">Rank B</th>
+                        <th class="text-right">Δ rank</th>
+                        <th class="text-right">Score A</th>
+                        <th class="text-right">Score B</th>
+                        <th class="text-right">Δ score</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {#each pair.docs as row}
+                        <tr>
+                          <td class="font-mono text-xs" title={row.id}>{row.label}</td>
+                          <td class="text-right tabular-nums">{row.rankA ?? '—'}</td>
+                          <td class="text-right tabular-nums">{row.rankB ?? '—'}</td>
+                          <td class="text-right tabular-nums" class:text-error={row.rankDelta != null && row.rankDelta > 0} class:text-success={row.rankDelta != null && row.rankDelta < 0}>{row.rankDelta == null ? '—' : row.rankDelta > 0 ? `+${row.rankDelta}` : row.rankDelta}</td>
+                          <td class="text-right font-mono text-xs tabular-nums">{row.scoreA == null ? '—' : row.scoreA.toFixed(4)}</td>
+                          <td class="text-right font-mono text-xs tabular-nums">{row.scoreB == null ? '—' : row.scoreB.toFixed(4)}</td>
+                          <td class="text-right font-mono text-xs tabular-nums" class:text-success={row.scoreDelta != null && row.scoreDelta > 0} class:text-error={row.scoreDelta != null && row.scoreDelta < 0}>{row.scoreDelta == null ? '—' : `${row.scoreDelta > 0 ? '+' : ''}${row.scoreDelta.toFixed(4)}`}</td>
+                        </tr>
+                      {/each}
+                    </tbody>
+                  </table>
+                </div>
+              {:else}
+                <p class="text-xs text-base-content/50">Chọn hai run khác nhau. Cần ít nhất 2 lần Search.</p>
+              {/if}
+            {/if}
+            {#if history.length}
+              <div>
+                <p class="mb-1 text-xs font-medium">Lịch sử trên máy này</p>
+                <ul class="max-h-40 space-y-1 overflow-auto text-xs">
+                  {#each history as item}
+                    <li>
+                      <button class="link link-hover" type="button" onclick={() => restore(item)}>
+                        {new Date(item.at).toLocaleTimeString()} · q={item.query.q ?? ''} · {item.hitCount ?? 0} hits · {item.processingTimeMs ?? '—'}ms
+                      </button>
+                    </li>
+                  {/each}
+                </ul>
+              </div>
+            {/if}
+          </div>
+        {/if}
+      </div>
+      {#if fieldSource === 'stats'}
+        <p class="text-[11px] text-base-content/45">Field lấy từ stats vì /fields không trả về.</p>
+      {/if}
+    {/if}
+
+    <div class="flex justify-end border-t border-base-300 pt-3">
+      <button class="btn btn-primary btn-sm" type="submit" title="Ctrl+Enter">Search</button>
     </div>
 
-    <details class="bg-base-200/60 rounded-box">
-      <summary class="cursor-pointer px-3 py-2 text-sm font-medium">Pagination — offset, limit, page, hitsPerPage</summary>
-      <div class="grid grid-cols-1 gap-3 p-3 pt-0 sm:grid-cols-2 lg:grid-cols-4">
-        <label class="form-control">
-          <span class="label py-1"><span class="label-text text-xs font-mono">offset</span></span>
-          <input class="input input-bordered input-sm" bind:value={form.offset} />
-        </label>
-        <label class="form-control">
-          <span class="label py-1"><span class="label-text text-xs font-mono">limit</span></span>
-          <input class="input input-bordered input-sm" bind:value={form.limit} />
-        </label>
-        <label class="form-control">
-          <span class="label py-1"><span class="label-text text-xs font-mono">page</span><span class="label-text-alt text-[10px]">1-indexed</span></span>
-          <input class="input input-bordered input-sm" placeholder="bỏ trống = dùng offset" bind:value={form.page} />
-        </label>
-        <label class="form-control">
-          <span class="label py-1"><span class="label-text text-xs font-mono">hitsPerPage</span></span>
-          <input class="input input-bordered input-sm" placeholder="kèm page" bind:value={form.hitsPerPage} />
-        </label>
+    {#if result}
+      {@const facetEntries = result.facetDistribution && typeof result.facetDistribution === 'object' ? Object.entries(result.facetDistribution).filter((entry) => entry[1] && typeof entry[1] === 'object') : []}
+      <div class="border-t border-base-300 pt-3 {facetEntries.length ? 'search-results' : ''}">
+        {#if facetEntries.length}
+          <div class="facet-quick">
+            {#each facetEntries as [attr] (attr)}
+              <button
+                class="facet-quick-item"
+                class:facet-quick-item-on={facetJump === attr}
+                type="button"
+                onclick={() => jumpFacet(attr)}
+              >{attr}</button>
+            {/each}
+          </div>
+          <div class="facet-rail rounded-box bg-base-200/60 p-2" bind:this={facetPane}>
+            {#each facetEntries as [attr, vals] (attr)}
+              <section class="facet-block" class:facet-block-active={facetJump === attr} data-facet={attr}>
+                <p class="facet-block-title">{attr}</p>
+                <div class="facet-block-values">
+                  {#each Object.entries(vals) as [v, c]}
+                    {@const clause = facetClause(attr, String(v))}
+                    {@const selected = clause !== '' && (form.filter ?? '').includes(clause)}
+                    <button
+                        class="facet-value flex w-full items-center justify-between gap-2 rounded-md px-2 py-1 text-left text-xs {selected ? 'facet-value-on' : ''}"
+                      type="button"
+                      title={v}
+                      onclick={() => applyFacet(attr, String(v))}
+                    >
+                      <span class="min-w-0 truncate">{v}</span>
+                      <span class="shrink-0 tabular-nums {selected ? 'text-primary-content' : 'text-base-content/60'}">{c}</span>
+                    </button>
+                  {/each}
+                </div>
+                {#if result.facetStats?.[attr]}
+                  <p class="mt-1 px-2 text-[11px] text-base-content/55">{result.facetStats[attr].min} – {result.facetStats[attr].max}</p>
+                {/if}
+              </section>
+            {/each}
+          </div>
+        {/if}
+        <HitsViewer rows={result.hits ?? []} indexUid={indexUid} onSimilar={similar} split={facetEntries.length > 0}>
+          {#snippet leading()}
+            <span class="text-xs text-base-content/60">
+              {result.estimatedTotalHits ?? result.totalHits ?? result.hits.length} hits
+              {#if result.page != null} · page {result.page}{#if result.totalPages != null}/{result.totalPages}{/if}{/if}
+              · {result.processingTimeMs}ms
+            </span>
+            {#if hitCompare}
+              {#if hitCompare.orderChanged}<span class="status-chip status-chip-processing">order đổi</span>{:else}<span class="status-chip status-chip-canceled">order giữ</span>{/if}
+            {/if}
+            {#if embedderNames.length}
+              <input class="input input-bordered input-xs w-36" list="search-similar-embedders" placeholder="embedder" bind:value={similarEmbedder} />
+              <datalist id="search-similar-embedders">
+                {#each embedderNames as name}<option value={name}></option>{/each}
+              </datalist>
+            {/if}
+          {/snippet}
+        </HitsViewer>
       </div>
-    </details>
-
-    <details class="bg-base-200/60 rounded-box">
-      <summary class="cursor-pointer px-3 py-2 text-sm font-medium">Retrieve — attributesToRetrieve, attributesToSearchOn, distinct, locales</summary>
-      <div class="grid grid-cols-1 gap-3 p-3 pt-0 sm:grid-cols-2">
-        <label class="form-control">
-          <span class="label py-1"><span class="label-text text-xs font-mono">attributesToRetrieve</span></span>
-          <input class="input input-bordered input-sm" placeholder="*, id, title" bind:value={form.attributesToRetrieve} />
-        </label>
-        <label class="form-control">
-          <span class="label py-1"><span class="label-text text-xs font-mono">attributesToSearchOn</span></span>
-          <input class="input input-bordered input-sm" placeholder="title, overview" bind:value={form.attributesToSearchOn} />
-        </label>
-        <label class="form-control">
-          <span class="label py-1"><span class="label-text text-xs font-mono">distinct</span></span>
-          <input class="input input-bordered input-sm" placeholder="product_id" bind:value={form.distinct} />
-        </label>
-        <label class="form-control">
-          <span class="label py-1"><span class="label-text text-xs font-mono">locales</span></span>
-          <input class="input input-bordered input-sm" placeholder="en, vi" bind:value={form.locales} />
-        </label>
-      </div>
-    </details>
-
-    <details class="bg-base-200/60 rounded-box">
-      <summary class="cursor-pointer px-3 py-2 text-sm font-medium">Highlight & crop — highlight, crop, showMatchesPosition</summary>
-      <div class="grid grid-cols-1 gap-3 p-3 pt-0 sm:grid-cols-2">
-        <label class="label cursor-pointer justify-start gap-2 sm:col-span-2">
-          <input type="checkbox" class="checkbox checkbox-sm" bind:checked={form.highlightAll} />
-          <span class="text-sm">highlightAll → attributesToHighlight ["*"] nếu để trống field bên dưới</span>
-        </label>
-        <label class="form-control">
-          <span class="label py-1"><span class="label-text text-xs font-mono">attributesToHighlight</span></span>
-          <input class="input input-bordered input-sm" placeholder="title, overview" bind:value={form.attributesToHighlight} />
-        </label>
-        <label class="form-control">
-          <span class="label py-1"><span class="label-text text-xs font-mono">attributesToCrop</span></span>
-          <input class="input input-bordered input-sm" placeholder="overview" bind:value={form.attributesToCrop} />
-        </label>
-        <label class="form-control">
-          <span class="label py-1"><span class="label-text text-xs font-mono">highlightPreTag</span></span>
-          <input class="input input-bordered input-sm" placeholder="<em>" bind:value={form.highlightPreTag} />
-        </label>
-        <label class="form-control">
-          <span class="label py-1"><span class="label-text text-xs font-mono">highlightPostTag</span></span>
-          <input class="input input-bordered input-sm" placeholder="</em>" bind:value={form.highlightPostTag} />
-        </label>
-        <label class="form-control">
-          <span class="label py-1"><span class="label-text text-xs font-mono">cropLength</span></span>
-          <input class="input input-bordered input-sm" placeholder="10" bind:value={form.cropLength} />
-        </label>
-        <label class="form-control">
-          <span class="label py-1"><span class="label-text text-xs font-mono">cropMarker</span></span>
-          <input class="input input-bordered input-sm" placeholder="…" bind:value={form.cropMarker} />
-        </label>
-        <label class="label cursor-pointer justify-start gap-2">
-          <input type="checkbox" class="checkbox checkbox-sm" bind:checked={form.showMatchesPosition} />
-          <span class="text-sm font-mono">showMatchesPosition</span>
-        </label>
-      </div>
-    </details>
-
-    <details class="bg-base-200/60 rounded-box">
-      <summary class="cursor-pointer px-3 py-2 text-sm font-medium">Ranking & debug — score, threshold, performanceDetails</summary>
-      <div class="grid grid-cols-1 gap-3 p-3 pt-0 sm:grid-cols-2">
-        <label class="label cursor-pointer justify-start gap-2">
-          <input type="checkbox" class="checkbox checkbox-sm" bind:checked={form.showRankingScore} />
-          <span class="text-sm font-mono">showRankingScore</span>
-        </label>
-        <label class="label cursor-pointer justify-start gap-2">
-          <input type="checkbox" class="checkbox checkbox-sm" bind:checked={form.showRankingScoreDetails} disabled={!form.showRankingScore} />
-          <span class="text-sm font-mono">showRankingScoreDetails</span>
-        </label>
-        <label class="form-control">
-          <span class="label py-1"><span class="label-text text-xs font-mono">rankingScoreThreshold</span><span class="label-text-alt text-[10px]">0.0–1.0</span></span>
-          <input class="input input-bordered input-sm" placeholder="0.5" bind:value={form.rankingScoreThreshold} />
-        </label>
-        <label class="label cursor-pointer justify-start gap-2">
-          <input type="checkbox" class="checkbox checkbox-sm" bind:checked={form.showPerformanceDetails} />
-          <span class="text-sm font-mono">showPerformanceDetails</span>
-        </label>
-      </div>
-    </details>
-
-    <details class="bg-base-200/60 rounded-box">
-      <summary class="cursor-pointer px-3 py-2 text-sm font-medium">Hybrid / vector / media</summary>
-      <div class="grid grid-cols-1 gap-3 p-3 pt-0 sm:grid-cols-2">
-        <label class="form-control">
-          <span class="label py-1"><span class="label-text text-xs font-mono">hybrid.embedder</span></span>
-          <input class="input input-bordered input-sm" placeholder="default" bind:value={form.hybridEmbedder} />
-        </label>
-        <label class="form-control">
-          <span class="label py-1"><span class="label-text text-xs font-mono">hybrid.semanticRatio</span><span class="label-text-alt text-[10px]">0 keyword · 1 semantic</span></span>
-          <input class="input input-bordered input-sm" placeholder="0.5" bind:value={form.hybridSemanticRatio} />
-        </label>
-        <label class="form-control sm:col-span-2">
-          <span class="label py-1"><span class="label-text text-xs font-mono">vector</span></span>
-          <input class="input input-bordered input-sm" placeholder="0.1, 0.2, 0.3" bind:value={form.vector} />
-        </label>
-        <label class="label cursor-pointer justify-start gap-2">
-          <input type="checkbox" class="checkbox checkbox-sm" bind:checked={form.retrieveVectors} />
-          <span class="text-sm font-mono">retrieveVectors</span>
-        </label>
-        <label class="form-control sm:col-span-2">
-          <span class="label py-1"><span class="label-text text-xs font-mono">media</span><span class="label-text-alt text-[10px]">JSON object, POST only</span></span>
-          <textarea class="textarea textarea-bordered textarea-sm font-mono" rows="3" placeholder={'{ "image": { "url": "..." } }'} bind:value={form.mediaJson}></textarea>
-        </label>
-      </div>
-    </details>
-
-    <details class="bg-base-200/60 rounded-box">
-      <summary class="cursor-pointer px-3 py-2 text-sm font-medium">Network / personalize / inlineRule</summary>
-      <div class="grid grid-cols-1 gap-3 p-3 pt-0 sm:grid-cols-2">
-        <label class="form-control">
-          <span class="label py-1"><span class="label-text text-xs font-mono">useNetwork</span></span>
-          <select class="select select-bordered select-sm" bind:value={form.useNetwork}>
-            <option value="">(default)</option>
-            <option value="true">true</option>
-            <option value="false">false</option>
-          </select>
-        </label>
-        <label class="form-control sm:col-span-2">
-          <span class="label py-1"><span class="label-text text-xs font-mono">personalize.userContext</span></span>
-          <textarea class="textarea textarea-bordered textarea-sm" rows="2" placeholder="likes action movies" bind:value={form.personalizeUserContext}></textarea>
-        </label>
-        <label class="form-control sm:col-span-2">
-          <span class="label py-1"><span class="label-text text-xs font-mono">inlineRule</span><span class="label-text-alt text-[10px]">JSON object, experimental</span></span>
-          <textarea class="textarea textarea-bordered textarea-sm font-mono" rows="4" placeholder={'{ "uid": "...", "actions": [] }'} bind:value={form.inlineRuleJson}></textarea>
-        </label>
-      </div>
-    </details>
     {/if}
   </div>
 </form>
-
-{#if result}
-  <p class="text-xs text-base-content/60 mb-2">
-    {result.estimatedTotalHits ?? result.totalHits} hits
-    {#if result.page != null} · page {result.page}{#if result.totalPages != null}/{result.totalPages}{/if}{/if}
-    {#if result.hitsPerPage != null} · hitsPerPage {result.hitsPerPage}{/if}
-    {#if result.offset != null} · offset {result.offset}{/if}
-    {#if result.limit != null} · limit {result.limit}{/if}
-    · {result.processingTimeMs}ms
-  </p>
-  {#if hitCompare}
-    <p class="text-xs mb-2">
-      So với lần trước:
-      {#if hitCompare.orderChanged}<span class="status-chip status-chip-processing">order đổi</span>{:else}<span class="status-chip status-chip-canceled">order giữ</span>{/if}
-      {#if hitCompare.onlyA.length} · mất {hitCompare.onlyA.join(', ')}{/if}
-      {#if hitCompare.onlyB.length} · thêm {hitCompare.onlyB.join(', ')}{/if}
-    </p>
-  {/if}
-  {#if lastQuery}
-    <details class="bg-base-100 rounded-box shadow-sm mb-3">
-      <summary class="cursor-pointer px-3 py-2 text-xs font-medium">Raw request</summary>
-      <div class="p-3 pt-0"><CodeBlock value={lastQuery} /></div>
-    </details>
-    <details class="bg-base-100 rounded-box shadow-sm mb-3">
-      <summary class="cursor-pointer px-3 py-2 text-xs font-medium">Raw response</summary>
-      <div class="p-3 pt-0"><CodeBlock value={result} /></div>
-    </details>
-  {/if}
-  {#if result.facetDistribution}
-    <div class="flex flex-wrap gap-3 text-xs mb-3">
-      {#each Object.entries(result.facetDistribution) as [attr, vals]}
-        <div class="bg-base-100 rounded-box p-3 shadow-sm">
-          <div class="font-medium mb-1">{attr}</div>
-          {#each Object.entries(vals) as [v, c]}
-            <button class="link link-hover block" onclick={() => applyFacet(attr, v)}>{v} ({c})</button>
-          {/each}
-        </div>
-      {/each}
-    </div>
-  {/if}
-  {#if result.facetStats}
-    <div class="flex flex-wrap gap-3 text-xs mb-3">
-      {#each Object.entries(result.facetStats) as [attr, stats]}
-        <div class="bg-base-100 rounded-box p-3 shadow-sm">
-          <div class="font-medium mb-1">{attr} stats</div>
-          <div>min {stats.min} · max {stats.max}</div>
-        </div>
-      {/each}
-    </div>
-  {/if}
-  {#if result.performanceDetails}
-    <details class="bg-base-100 rounded-box shadow-sm mb-3">
-      <summary class="cursor-pointer px-3 py-2 text-xs font-medium">performanceDetails</summary>
-      <div class="p-3 pt-0">
-        <CodeBlock value={result.performanceDetails} />
-      </div>
-    </details>
-  {/if}
-  {#if history.length > 1}
-    <div class="card bg-base-100 shadow-sm mb-4">
-      <div class="card-body p-4 gap-3">
-        <h2 class="text-sm font-semibold">Debugger — so sánh 2 snapshot</h2>
-        <p class="text-xs text-base-content/55">Chọn hai lần chạy. Bảng so rank, rankingScore từng doc, latency.</p>
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-          <label class="form-control">
-            <span class="mb-1 text-xs text-base-content/60">Run A</span>
-            <select class="select select-bordered select-sm w-full" bind:value={snapA}>
-              {#each history as item, i}
-                <option value={String(i)}>{new Date(item.at).toLocaleTimeString()} · q={item.query.q ?? ''} · {item.processingTimeMs ?? '—'}ms</option>
-              {/each}
-            </select>
-          </label>
-          <label class="form-control">
-            <span class="mb-1 text-xs text-base-content/60">Run B</span>
-            <select class="select select-bordered select-sm w-full" bind:value={snapB}>
-              {#each history as item, i}
-                <option value={String(i)}>{new Date(item.at).toLocaleTimeString()} · q={item.query.q ?? ''} · {item.processingTimeMs ?? '—'}ms</option>
-              {/each}
-            </select>
-          </label>
-        </div>
-        {#if pair}
-          <p class="text-xs text-base-content/60">
-            Latency A {pair.latencyA ?? '—'}ms → B {pair.latencyB ?? '—'}ms
-            {#if pair.latencyDelta != null}
-              · Δ {pair.latencyDelta > 0 ? '+' : ''}{pair.latencyDelta}ms
-            {/if}
-            ·
-            {#if pair.ids.orderChanged}<span class="status-chip status-chip-processing">order đổi</span>{:else}<span class="status-chip status-chip-canceled">order giữ</span>{/if}
-            {#if pair.ids.onlyA.length} · mất {pair.ids.onlyA.join(', ')}{/if}
-            {#if pair.ids.onlyB.length} · thêm {pair.ids.onlyB.join(', ')}{/if}
-          </p>
-          <div class="overflow-x-auto rounded-box border border-base-300">
-            <table class="table table-sm">
-              <thead>
-                <tr>
-                  <th>id</th>
-                  <th class="text-right">Rank A</th>
-                  <th class="text-right">Rank B</th>
-                  <th class="text-right">Δ rank</th>
-                  <th class="text-right">Score A</th>
-                  <th class="text-right">Score B</th>
-                  <th class="text-right">Δ score</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each pair.docs as row}
-                  <tr>
-                    <td class="font-mono text-xs">{row.id}</td>
-                    <td class="text-right tabular-nums">{row.rankA ?? '—'}</td>
-                    <td class="text-right tabular-nums">{row.rankB ?? '—'}</td>
-                    <td class="text-right tabular-nums" class:text-error={row.rankDelta != null && row.rankDelta > 0} class:text-success={row.rankDelta != null && row.rankDelta < 0}>
-                      {row.rankDelta == null ? '—' : row.rankDelta > 0 ? `+${row.rankDelta}` : row.rankDelta}
-                    </td>
-                    <td class="text-right tabular-nums font-mono text-xs">{row.scoreA == null ? '—' : row.scoreA.toFixed(4)}</td>
-                    <td class="text-right tabular-nums font-mono text-xs">{row.scoreB == null ? '—' : row.scoreB.toFixed(4)}</td>
-                    <td class="text-right tabular-nums font-mono text-xs" class:text-success={row.scoreDelta != null && row.scoreDelta > 0} class:text-error={row.scoreDelta != null && row.scoreDelta < 0}>
-                      {row.scoreDelta == null ? '—' : `${row.scoreDelta > 0 ? '+' : ''}${row.scoreDelta.toFixed(4)}`}
-                    </td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
-        {:else}
-          <p class="text-xs text-base-content/50">Chọn hai run khác nhau (cần ít nhất 2 lần Search).</p>
-        {/if}
-      </div>
-    </div>
-  {/if}
-  <HitsViewer rows={result.hits} indexUid={indexUid} onSimilar={similar} />
-{/if}
-
-{#if history.length}
-  <div class="card bg-base-100 shadow-sm mt-4">
-    <div class="card-body p-4 gap-3">
-      <h2 class="text-sm font-medium">Query history (máy local)</h2>
-      <ul class="text-xs space-y-1 max-h-48 overflow-auto">
-        {#each history as item}
-          <li>
-            <button class="link link-hover" onclick={() => restore(item)}>
-              {new Date(item.at).toLocaleTimeString()} · q={item.query.q ?? ''} · {item.hitCount ?? 0} hits · {item.processingTimeMs ?? '—'}ms
-            </button>
-          </li>
-        {/each}
-      </ul>
-    </div>
-  </div>
-{/if}
-
-{#if advanced}
-<div class="card bg-base-100 mt-4">
-  <div class="card-body p-4">
-    <div class="flex min-w-0 flex-wrap gap-2 text-sm">
-      <input class="input input-bordered input-sm min-w-0 flex-1" placeholder="facetName" bind:value={facetName} />
-      <input class="input input-bordered input-sm min-w-0 flex-1" placeholder="facetQuery" bind:value={facetQuery} />
-      <button class="btn btn-outline btn-sm shrink-0" onclick={runFacet}>Facet search</button>
-      <input class="input input-bordered input-sm w-40 shrink-0" placeholder="embedder (similar)" bind:value={similarEmbedder} />
-    </div>
-    <ul class="text-sm mt-2">
-      {#each facetHits as h}<li>{h.value} ({h.count})</li>{/each}
-    </ul>
-  </div>
-</div>
-{/if}

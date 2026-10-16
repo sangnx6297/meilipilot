@@ -12,6 +12,8 @@ var readPostPaths = []*regexp.Regexp{
 	regexp.MustCompile(`^/indexes/[^/]+/similar$`),
 	regexp.MustCompile(`^/indexes/[^/]+/documents/fetch$`),
 	regexp.MustCompile(`^/multi-search$`),
+	regexp.MustCompile(`^/logs/stream$`),
+	regexp.MustCompile(`^/render-template$`),
 }
 
 func IsReadRequest(method, path string) bool {
